@@ -1,0 +1,20 @@
+/*
+ * HID-HOP - Device Tree Overlay
+ *
+ * Copyright (c) 2024
+ * SPDX-License-Identifier: MIT
+ */
+
+/* Configure USB device controller with CDC ACM for debugging */
+&zephyr_udc0 {
+    cdc_acm_uart0 {
+        compatible = "zephyr,cdc-acm-uart";
+    };
+};
+
+/* Use the board's existing storage partition for NVS settings */
+/ {
+    chosen {
+        zephyr,settings-partition = &storage_partition;
+    };
+};

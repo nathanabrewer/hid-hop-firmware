@@ -1,0 +1,22 @@
+# Build artifacts
+build/
+*.o
+*.a
+*.elf
+*.hex
+*.bin
+*.map
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+._*
+
+# Claude
+.claude/
+CLAUDE.md

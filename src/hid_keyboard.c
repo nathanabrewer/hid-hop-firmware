@@ -1,0 +1,431 @@
+/*
+ * Brewer BLE HID Bridge - USB HID Keyboard Implementation
+ *
+ * Implements USB HID keyboard functionality using Zephyr's USB subsystem.
+ */
+
+#include <zephyr/kernel.h>
+#include <zephyr/logging/log.h>
+#include <zephyr/usb/usb_device.h>
+#include <zephyr/usb/class/usb_hid.h>
+
+#include "hid_keyboard.h"
+
+LOG_MODULE_REGISTER(hid_keyboard, LOG_LEVEL_INF);
+
+/* USB HID Keyboard Report Descriptor */
+static const uint8_t keyboard_report_desc[] = {
+    /* Usage Page (Generic Desktop) */
+    0x05, 0x01,
+    /* Usage (Keyboard) */
+    0x09, 0x06,
+    /* Collection (Application) */
+    0xA1, 0x01,
+        /* Report ID 1 */
+        0x85, 0x01,
+        /* Modifier keys (Ctrl, Shift, Alt, GUI) */
+        0x05, 0x07,       /* Usage Page (Key Codes) */
+        0x19, 0xE0,       /* Usage Minimum (224) */
+        0x29, 0xE7,       /* Usage Maximum (231) */
+        0x15, 0x00,       /* Logical Minimum (0) */
+        0x25, 0x01,       /* Logical Maximum (1) */
+        0x75, 0x01,       /* Report Size (1) */
+        0x95, 0x08,       /* Report Count (8) */
+        0x81, 0x02,       /* Input (Data, Variable, Absolute) */
+        /* Reserved byte */
+        0x95, 0x01,       /* Report Count (1) */
+        0x75, 0x08,       /* Report Size (8) */
+        0x81, 0x01,       /* Input (Constant) */
+        /* LEDs (output) */
+        0x95, 0x05,       /* Report Count (5) */
+        0x75, 0x01,       /* Report Size (1) */
+        0x05, 0x08,       /* Usage Page (LEDs) */
+        0x19, 0x01,       /* Usage Minimum (1) */
+        0x29, 0x05,       /* Usage Maximum (5) */
+        0x91, 0x02,       /* Output (Data, Variable, Absolute) */
+        /* LED padding */
+        0x95, 0x01,       /* Report Count (1) */
+        0x75, 0x03,       /* Report Size (3) */
+        0x91, 0x01,       /* Output (Constant) */
+        /* Key codes (6 simultaneous keys) */
+        0x95, 0x06,       /* Report Count (6) */
+        0x75, 0x08,       /* Report Size (8) */
+        0x15, 0x00,       /* Logical Minimum (0) */
+        0x25, 0x65,       /* Logical Maximum (101) */
+        0x05, 0x07,       /* Usage Page (Key Codes) */
+        0x19, 0x00,       /* Usage Minimum (0) */
+        0x29, 0x65,       /* Usage Maximum (101) */
+        0x81, 0x00,       /* Input (Data, Array) */
+    /* End Collection */
+    0xC0
+};
+
+/* Keyboard HID report structure */
+struct keyboard_report {
+    uint8_t report_id;
+    uint8_t modifiers;
+    uint8_t reserved;
+    uint8_t keys[6];
+} __packed;
+
+/* Device and state */
+static const struct device *hid_dev;
+static struct keyboard_report report;
+static K_SEM_DEFINE(hid_sem, 1, 1);
+static bool initialized = false;
+
+/* Timing constants */
+#define KEY_PRESS_DELAY_MS   10
+#define KEY_RELEASE_DELAY_MS 10
+
+/* USB HID callbacks */
+static void hid_int_in_ready_cb(const struct device *dev)
+{
+    ARG_UNUSED(dev);
+    k_sem_give(&hid_sem);
+}
+
+static const struct hid_ops keyboard_ops = {
+    .int_in_ready = hid_int_in_ready_cb,
+};
+
+/**
+ * Send the current keyboard report
+ */
+static bool send_report(void)
+{
+    int ret;
+
+    if (!initialized) {
+        return false;
+    }
+
+    k_sem_take(&hid_sem, K_FOREVER);
+    ret = hid_int_ep_write(hid_dev, (uint8_t *)&report, sizeof(report), NULL);
+    if (ret < 0) {
+        LOG_ERR("Failed to send keyboard report: %d", ret);
+        k_sem_give(&hid_sem);
+        return false;
+    }
+
+    return true;
+}
+
+/**
+ * Initialize USB HID keyboard
+ */
+bool hid_keyboard_init(void)
+{
+    int ret;
+
+    hid_dev = device_get_binding("HID_0");
+    if (hid_dev == NULL) {
+        LOG_ERR("Cannot find HID_0 device");
+        return false;
+    }
+
+    /* Register report descriptor (void in Zephyr 3.x) */
+    usb_hid_register_device(hid_dev,
+                            keyboard_report_desc,
+                            sizeof(keyboard_report_desc),
+                            &keyboard_ops);
+
+    ret = usb_hid_init(hid_dev);
+    if (ret) {
+        LOG_ERR("Failed to init HID keyboard: %d", ret);
+        return false;
+    }
+
+    /* Initialize report */
+    memset(&report, 0, sizeof(report));
+    report.report_id = 1;
+
+    initialized = true;
+    LOG_INF("HID keyboard initialized");
+
+    return true;
+}
+
+/**
+ * ASCII to HID keycode lookup table
+ * Format: [keycode, needs_shift]
+ */
+static const uint8_t ascii_to_hid_table[128][2] = {
+    /* 0x00 - 0x1F: Control characters (not mapped) */
+    [0x00 ... 0x1F] = {0, 0},
+    /* Space */
+    [' '] = {0x2C, 0},
+    /* ! */
+    ['!'] = {0x1E, 1},
+    /* " */
+    ['"'] = {0x34, 1},
+    /* # */
+    ['#'] = {0x20, 1},
+    /* $ */
+    ['$'] = {0x21, 1},
+    /* % */
+    ['%'] = {0x22, 1},
+    /* & */
+    ['&'] = {0x24, 1},
+    /* ' */
+    ['\''] = {0x34, 0},
+    /* ( */
+    ['('] = {0x26, 1},
+    /* ) */
+    [')'] = {0x27, 1},
+    /* * */
+    ['*'] = {0x25, 1},
+    /* + */
+    ['+'] = {0x2E, 1},
+    /* , */
+    [','] = {0x36, 0},
+    /* - */
+    ['-'] = {0x2D, 0},
+    /* . */
+    ['.'] = {0x37, 0},
+    /* / */
+    ['/'] = {0x38, 0},
+    /* 0-9 */
+    ['0'] = {0x27, 0},
+    ['1'] = {0x1E, 0},
+    ['2'] = {0x1F, 0},
+    ['3'] = {0x20, 0},
+    ['4'] = {0x21, 0},
+    ['5'] = {0x22, 0},
+    ['6'] = {0x23, 0},
+    ['7'] = {0x24, 0},
+    ['8'] = {0x25, 0},
+    ['9'] = {0x26, 0},
+    /* : */
+    [':'] = {0x33, 1},
+    /* ; */
+    [';'] = {0x33, 0},
+    /* < */
+    ['<'] = {0x36, 1},
+    /* = */
+    ['='] = {0x2E, 0},
+    /* > */
+    ['>'] = {0x37, 1},
+    /* ? */
+    ['?'] = {0x38, 1},
+    /* @ */
+    ['@'] = {0x1F, 1},
+    /* A-Z (uppercase) */
+    ['A'] = {0x04, 1},
+    ['B'] = {0x05, 1},
+    ['C'] = {0x06, 1},
+    ['D'] = {0x07, 1},
+    ['E'] = {0x08, 1},
+    ['F'] = {0x09, 1},
+    ['G'] = {0x0A, 1},
+    ['H'] = {0x0B, 1},
+    ['I'] = {0x0C, 1},
+    ['J'] = {0x0D, 1},
+    ['K'] = {0x0E, 1},
+    ['L'] = {0x0F, 1},
+    ['M'] = {0x10, 1},
+    ['N'] = {0x11, 1},
+    ['O'] = {0x12, 1},
+    ['P'] = {0x13, 1},
+    ['Q'] = {0x14, 1},
+    ['R'] = {0x15, 1},
+    ['S'] = {0x16, 1},
+    ['T'] = {0x17, 1},
+    ['U'] = {0x18, 1},
+    ['V'] = {0x19, 1},
+    ['W'] = {0x1A, 1},
+    ['X'] = {0x1B, 1},
+    ['Y'] = {0x1C, 1},
+    ['Z'] = {0x1D, 1},
+    /* [ */
+    ['['] = {0x2F, 0},
+    /* \ */
+    ['\\'] = {0x31, 0},
+    /* ] */
+    [']'] = {0x30, 0},
+    /* ^ */
+    ['^'] = {0x23, 1},
+    /* _ */
+    ['_'] = {0x2D, 1},
+    /* ` */
+    ['`'] = {0x35, 0},
+    /* a-z (lowercase) */
+    ['a'] = {0x04, 0},
+    ['b'] = {0x05, 0},
+    ['c'] = {0x06, 0},
+    ['d'] = {0x07, 0},
+    ['e'] = {0x08, 0},
+    ['f'] = {0x09, 0},
+    ['g'] = {0x0A, 0},
+    ['h'] = {0x0B, 0},
+    ['i'] = {0x0C, 0},
+    ['j'] = {0x0D, 0},
+    ['k'] = {0x0E, 0},
+    ['l'] = {0x0F, 0},
+    ['m'] = {0x10, 0},
+    ['n'] = {0x11, 0},
+    ['o'] = {0x12, 0},
+    ['p'] = {0x13, 0},
+    ['q'] = {0x14, 0},
+    ['r'] = {0x15, 0},
+    ['s'] = {0x16, 0},
+    ['t'] = {0x17, 0},
+    ['u'] = {0x18, 0},
+    ['v'] = {0x19, 0},
+    ['w'] = {0x1A, 0},
+    ['x'] = {0x1B, 0},
+    ['y'] = {0x1C, 0},
+    ['z'] = {0x1D, 0},
+    /* { */
+    ['{'] = {0x2F, 1},
+    /* | */
+    ['|'] = {0x31, 1},
+    /* } */
+    ['}'] = {0x30, 1},
+    /* ~ */
+    ['~'] = {0x35, 1},
+    /* DEL - not mapped */
+    [0x7F] = {0, 0},
+};
+
+/**
+ * Convert ASCII to HID keycode
+ */
+bool ascii_to_hid_keycode(uint8_t ascii, uint8_t *keycode, bool *needs_shift)
+{
+    if (ascii >= 128) {
+        return false;
+    }
+
+    uint8_t code = ascii_to_hid_table[ascii][0];
+    if (code == 0 && ascii != 0) {
+        /* Special case: tab, enter, etc. */
+        switch (ascii) {
+        case '\t':
+            *keycode = 0x2B;  /* Tab */
+            *needs_shift = false;
+            return true;
+        case '\n':
+        case '\r':
+            *keycode = 0x28;  /* Enter */
+            *needs_shift = false;
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    *keycode = code;
+    *needs_shift = ascii_to_hid_table[ascii][1] != 0;
+    return true;
+}
+
+/**
+ * Type a string of ASCII characters
+ */
+bool hid_keyboard_type(const char *text, size_t length)
+{
+    if (!initialized || text == NULL) {
+        return false;
+    }
+
+    for (size_t i = 0; i < length; i++) {
+        uint8_t keycode;
+        bool needs_shift;
+
+        if (!ascii_to_hid_keycode((uint8_t)text[i], &keycode, &needs_shift)) {
+            LOG_WRN("Unsupported character: 0x%02X", text[i]);
+            continue;
+        }
+
+        /* Set up the report */
+        memset(&report.keys, 0, sizeof(report.keys));
+        report.modifiers = needs_shift ? 0x02 : 0x00;  /* Left Shift */
+        report.keys[0] = keycode;
+
+        /* Send key press */
+        if (!send_report()) {
+            return false;
+        }
+        k_sleep(K_MSEC(KEY_PRESS_DELAY_MS));
+
+        /* Send key release */
+        report.modifiers = 0;
+        report.keys[0] = 0;
+        if (!send_report()) {
+            return false;
+        }
+        k_sleep(K_MSEC(KEY_RELEASE_DELAY_MS));
+    }
+
+    return true;
+}
+
+/**
+ * Press a single key with modifiers
+ */
+bool hid_keyboard_key_press(uint8_t keycode, uint8_t modifiers)
+{
+    if (!initialized) {
+        return false;
+    }
+
+    memset(&report.keys, 0, sizeof(report.keys));
+    report.modifiers = modifiers;
+    report.keys[0] = keycode;
+
+    return send_report();
+}
+
+/**
+ * Release all keys
+ */
+bool hid_keyboard_release_all(void)
+{
+    if (!initialized) {
+        return false;
+    }
+
+    memset(&report.keys, 0, sizeof(report.keys));
+    report.modifiers = 0;
+
+    return send_report();
+}
+
+/**
+ * Send a key combination (press all, release all)
+ */
+bool hid_keyboard_combo(const uint8_t *keycodes, uint8_t count, uint8_t modifiers)
+{
+    if (!initialized || keycodes == NULL || count == 0 || count > 6) {
+        return false;
+    }
+
+    /* Set up combo */
+    memset(&report.keys, 0, sizeof(report.keys));
+    report.modifiers = modifiers;
+    for (uint8_t i = 0; i < count; i++) {
+        report.keys[i] = keycodes[i];
+    }
+
+    /* Send key press */
+    if (!send_report()) {
+        return false;
+    }
+    k_sleep(K_MSEC(KEY_PRESS_DELAY_MS));
+
+    /* Release all */
+    return hid_keyboard_release_all();
+}
+
+/**
+ * Tap a key (press and release)
+ */
+bool hid_keyboard_tap(uint8_t keycode, uint8_t modifiers)
+{
+    if (!hid_keyboard_key_press(keycode, modifiers)) {
+        return false;
+    }
+    k_sleep(K_MSEC(KEY_PRESS_DELAY_MS));
+    return hid_keyboard_release_all();
+}
