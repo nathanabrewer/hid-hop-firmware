@@ -1,0 +1,82 @@
+/dts-v1/;
+#include <nordic/nrf52840_qiaa.dtsi>
+#include <zephyr/dt-bindings/input/input-event-codes.h>
+
+/ {
+	model = "Raytac MDBT50Q-CX-40 USB Dongle";
+	compatible = "raytac,mdbt50q-cx-40";
+
+	chosen {
+		zephyr,sram = &sram0;
+		zephyr,flash = &flash0;
+		zephyr,code-partition = &slot0_partition;
+	};
+
+	leds {
+		compatible = "gpio-leds";
+		led0: led_0 {
+			gpios = <&gpio0 6 GPIO_ACTIVE_LOW>;
+			label = "Blue LED 1";
+		};
+		led1: led_1 {
+			gpios = <&gpio0 8 GPIO_ACTIVE_LOW>;
+			label = "Blue LED 2";
+		};
+	};
+
+	aliases {
+		led0 = &led0;
+		led1 = &led1;
+		led2 = &led0;  /* DK library expects 4 LEDs, map to existing */
+		led3 = &led1;
+		sw0 = &button0;
+	};
+
+	buttons {
+		compatible = "gpio-keys";
+		button0: button_0 {
+			gpios = <&gpio0 18 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+			label = "User button";
+			zephyr,code = <INPUT_KEY_0>;
+		};
+	};
+};
+
+&flash0 {
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		/* Nordic Open DFU bootloader at 0x0-0x1000 */
+		boot_partition: partition@0 {
+			label = "bootloader";
+			reg = <0x00000000 0x00001000>;
+		};
+		slot0_partition: partition@1000 {
+			label = "image-0";
+			reg = <0x00001000 0x000df000>;
+		};
+		storage_partition: partition@e0000 {
+			label = "storage";
+			reg = <0x000e0000 0x00020000>;
+		};
+	};
+};
+
+&gpio0 {
+	status = "okay";
+};
+
+&gpio1 {
+	status = "okay";
+};
+
+&gpiote {
+	status = "okay";
+};
+
+zephyr_udc0: &usbd {
+	compatible = "nordic,nrf-usbd";
+	status = "okay";
+};

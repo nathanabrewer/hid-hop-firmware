@@ -1,11 +1,16 @@
 cmake_minimum_required(VERSION 3.20)
 
-# Board configuration - nRF52840 Dongle or DK
-# Uncomment the one you're using:
-set(BOARD nrf52840dk_nrf52840)
-# set(BOARD nrf52840dongle_nrf52840)
+# Board can be set via -b flag or defaults to DK
+if(NOT DEFINED BOARD)
+    set(BOARD nrf52840dk_nrf52840)
+endif()
 
+# Base config + board-specific config if it exists
 set(CONF_FILE "prj.conf")
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/boards/${BOARD}.conf")
+    set(CONF_FILE "${CONF_FILE};boards/${BOARD}.conf")
+endif()
+
 set(DTC_OVERLAY_FILE "app.overlay")
 
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})

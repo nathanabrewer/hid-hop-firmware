@@ -6,6 +6,57 @@
  */
 
 #include <zephyr/kernel.h>
+#include <zephyr/init.h>
+
+/* Early boot LED blink for debugging - runs before almost everything */
+#define P0_OUTSET    (*(volatile uint32_t *)0x50000508)
+#define P0_OUTCLR    (*(volatile uint32_t *)0x5000050C)
+#define P0_DIRSET    (*(volatile uint32_t *)0x50000518)
+#define P0_PIN_CNF(n) (*(volatile uint32_t *)(0x50000700 + (n)*4))
+#define DBG_LED1 6
+#define DBG_LED2 8
+
+static void dbg_delay(void) {
+    for (volatile int i = 0; i < 800000; i++) { __asm__("nop"); }
+}
+
+static void dbg_blink(int count) {
+    for (int j = 0; j < count; j++) {
+        P0_OUTCLR = (1 << DBG_LED1) | (1 << DBG_LED2);
+        dbg_delay();
+        P0_OUTSET = (1 << DBG_LED1) | (1 << DBG_LED2);
+        dbg_delay();
+    }
+    /* Pause between blink sets */
+    dbg_delay(); dbg_delay();
+}
+
+static int dbg_pre_kernel_1(void) {
+    P0_PIN_CNF(DBG_LED1) = 3;
+    P0_PIN_CNF(DBG_LED2) = 3;
+    P0_DIRSET = (1 << DBG_LED1) | (1 << DBG_LED2);
+    dbg_blink(1);  /* 1 blink = PRE_KERNEL_1 */
+    return 0;
+}
+SYS_INIT(dbg_pre_kernel_1, PRE_KERNEL_1, 0);
+
+static int dbg_pre_kernel_2(void) {
+    dbg_blink(2);  /* 2 blinks = PRE_KERNEL_2 */
+    return 0;
+}
+SYS_INIT(dbg_pre_kernel_2, PRE_KERNEL_2, 99);
+
+static int dbg_post_kernel(void) {
+    dbg_blink(3);  /* 3 blinks = POST_KERNEL */
+    return 0;
+}
+SYS_INIT(dbg_post_kernel, POST_KERNEL, 99);
+
+static int dbg_application(void) {
+    dbg_blink(4);  /* 4 blinks = APPLICATION */
+    return 0;
+}
+SYS_INIT(dbg_application, APPLICATION, 99);
 #include <zephyr/logging/log.h>
 #include <zephyr/usb/usb_device.h>
 #include <dk_buttons_and_leds.h>
@@ -57,6 +108,7 @@ bool is_usb_ready(void)
 
 /**
  * Initialize GPIO and LEDs
+ * Note: Button init failure is non-fatal (dongle may not have buttons)
  */
 static int init_gpio(void)
 {
@@ -70,8 +122,8 @@ static int init_gpio(void)
 
     err = dk_buttons_init(button_handler);
     if (err) {
-        LOG_ERR("Failed to initialize buttons: %d", err);
-        return err;
+        /* Non-fatal - dongle may not have GPIO buttons */
+        LOG_WRN("Button init failed: %d (continuing without buttons)", err);
     }
 
     /* Initial LED state - all off */
@@ -276,6 +328,9 @@ static void status_led_task(void)
 int main(void)
 {
     int err;
+
+    /* Debug: 5 blinks = reached main() */
+    dbg_blink(5);
 
     LOG_INF("=== HID-HOP starting ===");
     LOG_INF("Protocol version: %d.%d", PROTOCOL_VERSION_MAJOR, PROTOCOL_VERSION_MINOR);

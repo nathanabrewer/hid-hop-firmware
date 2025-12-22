@@ -1,0 +1,9 @@
+/*
+ * Raytac MDBT50Q-CX overlay for nrf52840dk board
+ */
+
+/ {
+    chosen {
+        zephyr,code-partition = &slot0_partition;
+    };
+};

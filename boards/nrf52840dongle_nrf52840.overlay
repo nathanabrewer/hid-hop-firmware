@@ -1,0 +1,26 @@
+/*
+ * Board overlay for Raytac MDBT50Q-CX-40 dongle
+ * Keep it minimal - just disable what we don't need
+ */
+
+/* Disable UART - not available on dongle */
+&uart0 {
+    status = "disabled";
+};
+
+/* Disable CDC ACM since we're HID-only */
+&zephyr_udc0 {
+    cdc_acm_uart0: cdc_acm_uart0 {
+        status = "disabled";
+    };
+};
+
+/ {
+    chosen {
+        /delete-property/ zephyr,console;
+        /delete-property/ zephyr,shell-uart;
+        /delete-property/ zephyr,uart-mcumgr;
+        /delete-property/ zephyr,bt-mon-uart;
+        /delete-property/ zephyr,bt-c2h-uart;
+    };
+};

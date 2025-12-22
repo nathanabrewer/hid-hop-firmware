@@ -121,6 +121,25 @@ if [ "$USE_DOCKER" = true ]; then
         BUILD_ARGS="$BUILD_ARGS --pristine"
     fi
 
+    # Check for board-specific config and overlay
+    BOARD_CONF="boards/${BOARD}.conf"
+    BOARD_OVERLAY="boards/${BOARD}.overlay"
+    CMAKE_ARGS=""
+
+    if [ -f "$FIRMWARE_DIR/$BOARD_CONF" ]; then
+        echo -e "Using board config: ${CYAN}${BOARD_CONF}${NC}"
+        CMAKE_ARGS="-DEXTRA_CONF_FILE=$BOARD_CONF"
+    fi
+
+    if [ -f "$FIRMWARE_DIR/$BOARD_OVERLAY" ]; then
+        echo -e "Using board overlay: ${CYAN}${BOARD_OVERLAY}${NC}"
+        CMAKE_ARGS="$CMAKE_ARGS -DEXTRA_DTC_OVERLAY_FILE=$BOARD_OVERLAY"
+    fi
+
+    if [ -n "$CMAKE_ARGS" ]; then
+        BUILD_ARGS="$BUILD_ARGS -- $CMAKE_ARGS"
+    fi
+
     docker run --rm \
         -v "$FIRMWARE_DIR:/app" \
         -w /app \

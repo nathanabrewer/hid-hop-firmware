@@ -1,0 +1,20 @@
+CONFIG_SOC_SERIES_NRF52X=y
+CONFIG_SOC_NRF52840_QIAA=y
+CONFIG_BOARD_RAYTAC_MDBT50Q_CX_40=y
+
+# Enable MPU and stack protection
+CONFIG_ARM_MPU=y
+CONFIG_HW_STACK_PROTECTION=y
+
+# Enable GPIO
+CONFIG_GPIO=y
+
+# Use internal RC oscillator (no external crystal)
+CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC=y
+
+# Use on-chip BLE controller with SoftDevice Link Layer
+CONFIG_BT_CTLR=y
+CONFIG_BT_LL_SOFTDEVICE=y
+
+# No DCDC - dongle has no inductor
+# (SOC_DCDC_NRF52X is not selected, so DCDC stays off)
