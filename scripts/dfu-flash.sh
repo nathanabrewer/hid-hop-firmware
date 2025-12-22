@@ -16,8 +16,8 @@ CYAN='\033[0;36m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-# DFU is for dongles, so default to dongle board
-BOARD="${BOARD:-nrf52840dongle_nrf52840}"
+# DFU is for dongles - default to Raytac CX-40
+BOARD="${BOARD:-raytac_mdbt50q_cx_40}"
 
 HEX_FILE="${FIRMWARE_DIR}/build/zephyr/zephyr.hex"
 DFU_PKG="${FIRMWARE_DIR}/build/firmware.zip"

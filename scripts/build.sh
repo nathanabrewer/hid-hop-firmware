@@ -13,6 +13,7 @@ PROJECT_ROOT="$(dirname "$FIRMWARE_DIR")"
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # Default values
@@ -27,7 +28,8 @@ usage() {
     echo ""
     echo "Options:"
     echo "  -b, --board BOARD     Target board (default: nrf52840dk_nrf52840)"
-    echo "                        Options: nrf52840dk_nrf52840, nrf52840dongle_nrf52840"
+    echo "                        Options: nrf52840dk_nrf52840, nrf52840dongle_nrf52840,"
+    echo "                                 raytac_mdbt50q_cx_40"
     echo "  -c, --clean           Clean build (remove build directory first)"
     echo "  -d, --docker-rebuild  Rebuild Docker image from scratch (no cache)"
     echo "  -l, --local           Build locally instead of using Docker"
@@ -121,19 +123,19 @@ if [ "$USE_DOCKER" = true ]; then
         BUILD_ARGS="$BUILD_ARGS --pristine"
     fi
 
-    # Check for board-specific config and overlay
-    BOARD_CONF="boards/${BOARD}.conf"
-    BOARD_OVERLAY="boards/${BOARD}.overlay"
+    # Check for custom board definition (boards/arm/<board>/)
+    CUSTOM_BOARD_DIR="boards/arm/${BOARD}"
     CMAKE_ARGS=""
 
-    if [ -f "$FIRMWARE_DIR/$BOARD_CONF" ]; then
-        echo -e "Using board config: ${CYAN}${BOARD_CONF}${NC}"
-        CMAKE_ARGS="-DEXTRA_CONF_FILE=$BOARD_CONF"
+    if [ -d "$FIRMWARE_DIR/$CUSTOM_BOARD_DIR" ]; then
+        echo -e "Using custom board: ${CYAN}${BOARD}${NC}"
+        CMAKE_ARGS="-DBOARD_ROOT=/workspace"
     fi
 
-    if [ -f "$FIRMWARE_DIR/$BOARD_OVERLAY" ]; then
-        echo -e "Using board overlay: ${CYAN}${BOARD_OVERLAY}${NC}"
-        CMAKE_ARGS="$CMAKE_ARGS -DEXTRA_DTC_OVERLAY_FILE=$BOARD_OVERLAY"
+    # Check for board-specific config overlay
+    BOARD_CONF="boards/${BOARD}.conf"
+    if [ -f "$FIRMWARE_DIR/$BOARD_CONF" ]; then
+        echo -e "Using board config: ${CYAN}${BOARD_CONF}${NC}"
     fi
 
     if [ -n "$CMAKE_ARGS" ]; then
@@ -141,8 +143,8 @@ if [ "$USE_DOCKER" = true ]; then
     fi
 
     docker run --rm \
-        -v "$FIRMWARE_DIR:/app" \
-        -w /app \
+        -v "$FIRMWARE_DIR:/workspace" \
+        -w /workspace \
         "$IMAGE_NAME" \
         west build $BUILD_ARGS
 
