@@ -1,0 +1,21 @@
+# HID-HOP Application Kconfig
+
+menu "HID-HOP Configuration"
+
+config DEBUG_BOOT_BLINKS
+	bool "Enable debug LED blinks during boot"
+	default n
+	help
+	  Enable LED blink sequence during boot to help diagnose
+	  which init stage is crashing. Adds ~10 seconds to boot time.
+
+	  Blink pattern:
+	  1 blink = PRE_KERNEL_1
+	  2 blinks = PRE_KERNEL_2
+	  3 blinks = POST_KERNEL
+	  4 blinks = APPLICATION
+	  5 blinks = main() reached
+
+endmenu
+
+source "Kconfig.zephyr"

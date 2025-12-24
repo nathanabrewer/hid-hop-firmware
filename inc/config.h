@@ -40,6 +40,13 @@ bool config_set_name(const char *name, uint8_t length);
 bool config_pin_enabled(void);
 
 /**
+ * Get current PIN (for key derivation)
+ * @param pin Buffer to store PIN (must be at least MAX_PIN_LENGTH + 1)
+ * @return Length of PIN, or 0 if not set
+ */
+uint8_t config_get_pin(char *pin);
+
+/**
  * Set PIN
  * @param pin PIN digits (ASCII)
  * @param length PIN length

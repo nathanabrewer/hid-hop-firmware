@@ -8,7 +8,12 @@
 #include <zephyr/kernel.h>
 #include <zephyr/init.h>
 
-/* Early boot LED blink for debugging - runs before almost everything */
+/*
+ * Debug boot LED blinks - helps identify which init stage crashes.
+ * DISABLED by default (adds ~10+ seconds to boot time).
+ * To enable: add CONFIG_DEBUG_BOOT_BLINKS=y to prj.conf
+ */
+#ifdef CONFIG_DEBUG_BOOT_BLINKS
 #define P0_OUTSET    (*(volatile uint32_t *)0x50000508)
 #define P0_OUTCLR    (*(volatile uint32_t *)0x5000050C)
 #define P0_DIRSET    (*(volatile uint32_t *)0x50000518)
@@ -57,6 +62,7 @@ static int dbg_application(void) {
     return 0;
 }
 SYS_INIT(dbg_application, APPLICATION, 99);
+#endif /* CONFIG_DEBUG_BOOT_BLINKS */
 #include <zephyr/logging/log.h>
 #include <zephyr/usb/usb_device.h>
 #include <dk_buttons_and_leds.h>
@@ -69,6 +75,8 @@ SYS_INIT(dbg_application, APPLICATION, 99);
 #include "security.h"
 #include "config.h"
 #include "gpio_control.h"
+#include "jsonl_serial.h"
+#include "mesh_hid.h"
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
@@ -85,6 +93,9 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 /* Forward declarations */
 static void ble_command_handler(const uint8_t *data, size_t length);
 static void button_handler(uint32_t button_state, uint32_t has_changed);
+static void serial_to_ble_callback(const char *json_line, size_t len);
+static void mesh_msg_handler(uint16_t src_addr, mesh_msg_type_t type,
+                             const uint8_t *payload, size_t len);
 
 /* Global state */
 static bool usb_enabled = false;
@@ -197,6 +208,51 @@ static void button_handler(uint32_t button_state, uint32_t has_changed)
             LOG_INF("Button 2 pressed");
             /* Reserved for future use */
         }
+    }
+}
+
+/**
+ * Callback for routing serial messages to BLE phone
+ */
+static void serial_to_ble_callback(const char *json_line, size_t len)
+{
+    LOG_DBG("Serial->BLE: %zu bytes", len);
+    ble_hid_service_send_jsonl(json_line, len);
+}
+
+/**
+ * Handle incoming mesh messages and forward to serial
+ */
+static void mesh_msg_handler(uint16_t src_addr, mesh_msg_type_t type,
+                             const uint8_t *payload, size_t len)
+{
+    LOG_INF("Mesh msg from 0x%04x, type=%d, len=%zu", src_addr, type, len);
+
+    switch (type) {
+    case MESH_MSG_DISCOVERY_RESP: {
+        /* Discovery response - node announced itself */
+        if (len >= sizeof(mesh_discovery_t)) {
+            const mesh_discovery_t *disc = (const mesh_discovery_t *)payload;
+            char extra[128];
+            snprintf(extra, sizeof(extra),
+                "\"name\":\"%.*s\",\"caps\":\"0x%02x\"",
+                disc->name_len, disc->name, disc->capabilities);
+            jsonl_serial_send_mesh_event(src_addr, "mesh_discovered", extra);
+        }
+        break;
+    }
+    case MESH_MSG_HID_CMD:
+        /* HID command from another node - would execute locally */
+        jsonl_serial_send_mesh_event(src_addr, "mesh_hid_cmd", NULL);
+        break;
+
+    case MESH_MSG_STATUS:
+        jsonl_serial_send_mesh_event(src_addr, "mesh_status_rcvd", NULL);
+        break;
+
+    default:
+        LOG_DBG("Unhandled mesh msg type: %d", type);
+        break;
     }
 }
 
@@ -329,8 +385,10 @@ int main(void)
 {
     int err;
 
+#ifdef CONFIG_DEBUG_BOOT_BLINKS
     /* Debug: 5 blinks = reached main() */
     dbg_blink(5);
+#endif
 
     LOG_INF("=== HID-HOP starting ===");
     LOG_INF("Protocol version: %d.%d", PROTOCOL_VERSION_MAJOR, PROTOCOL_VERSION_MINOR);
@@ -410,14 +468,58 @@ int main(void)
         k_sleep(K_MSEC(200));
     }
 
+    /* Initialize JSONL serial interface (uses CDC ACM) */
+    LOG_INF("Step 5: jsonl_serial_init...");
+    err = jsonl_serial_init();
+    if (err) {
+        LOG_WRN("JSONL serial init failed: %d (continuing without serial)", err);
+    } else {
+        /* Set callback for routing serial->BLE messages */
+        jsonl_serial_set_ble_callback(serial_to_ble_callback);
+        LOG_INF("Step 5: jsonl_serial_init DONE");
+    }
+
     /* Initialize BLE and start advertising */
-    LOG_INF("Step 5: ble_hid_service_init...");
+    LOG_INF("Step 6: ble_hid_service_init...");
     if (!ble_hid_service_init(ble_command_handler)) {
         LOG_ERR("BLE init failed");
         dk_set_led_on(ERROR_LED);
         return -1;
     }
-    LOG_INF("Step 5: ble_hid_service_init DONE");
+    LOG_INF("Step 6: ble_hid_service_init DONE");
+
+    /* Initialize BLE Mesh */
+    LOG_INF("Step 7: mesh_hid_init...");
+    err = mesh_hid_init();
+    if (err) {
+        LOG_ERR("Mesh init failed: %d", err);
+        /* Non-fatal - continue without mesh */
+    } else {
+        LOG_INF("Step 7: mesh_hid_init DONE");
+
+        /* Register mesh message callback */
+        mesh_hid_set_callback(mesh_msg_handler);
+
+        /* Self-provision as founder if not already provisioned */
+        if (!mesh_hid_is_provisioned()) {
+            LOG_INF("Not provisioned - self-provisioning as founder...");
+            err = mesh_hid_self_provision();
+            if (err && err != -EALREADY) {
+                LOG_WRN("Self-provision failed: %d", err);
+            }
+        } else {
+            LOG_INF("Already provisioned, addr=0x%04x", mesh_hid_get_addr());
+            /* Ensure app key is bound (may not be restored from NVS) */
+            mesh_hid_ensure_app_key();
+        }
+
+        /* Sync device name to mesh node name for discovery */
+        char device_name[MAX_DEVICE_NAME_LENGTH + 1];
+        if (config_get_name(device_name) > 0) {
+            mesh_hid_set_name(device_name);
+            LOG_INF("Mesh node name set to: %s", device_name);
+        }
+    }
 
     LOG_INF("=== Initialization complete - entering main loop ===");
 
