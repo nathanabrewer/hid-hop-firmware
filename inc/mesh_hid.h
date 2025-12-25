@@ -23,6 +23,7 @@
 /* Message opcodes (3-byte vendor opcode) */
 #define MESH_HID_OP_DISCOVERY       BT_MESH_MODEL_OP_3(0x01, MESH_HID_COMPANY_ID)
 #define MESH_HID_OP_DISCOVERY_RESP  BT_MESH_MODEL_OP_3(0x02, MESH_HID_COMPANY_ID)
+#define MESH_HID_OP_BEACON          BT_MESH_MODEL_OP_3(0x03, MESH_HID_COMPANY_ID)  /* One-way presence broadcast */
 #define MESH_HID_OP_HID_CMD         BT_MESH_MODEL_OP_3(0x10, MESH_HID_COMPANY_ID)
 #define MESH_HID_OP_HID_RESP        BT_MESH_MODEL_OP_3(0x11, MESH_HID_COMPANY_ID)
 #define MESH_HID_OP_STATUS          BT_MESH_MODEL_OP_3(0x20, MESH_HID_COMPANY_ID)
@@ -195,11 +196,19 @@ bool mesh_hid_app_key_bound(void);
 uint16_t mesh_hid_get_addr(void);
 
 /**
- * Send a discovery broadcast to find nearby nodes
+ * Send a discovery broadcast to find nearby nodes (request/response mode)
  *
  * @return 0 on success
  */
 int mesh_hid_send_discovery(void);
+
+/**
+ * Send a beacon broadcast to announce presence (one-way, no response)
+ * More reliable than discovery since there's no response collision
+ *
+ * @return 0 on success
+ */
+int mesh_hid_send_beacon(void);
 
 /**
  * Send a ping to a specific node

@@ -20,10 +20,6 @@
 #include <tinycrypt/sha256.h>
 #include <tinycrypt/constants.h>
 
-/* Internal mesh headers for direct app key access */
-#include "mesh/app_keys.h"
-#include "mesh/subnet.h"
-
 #include "config.h"
 #include "hid_keyboard.h"
 #include "hid_mouse.h"
@@ -96,6 +92,9 @@ static int discovery_handler(const struct bt_mesh_model *model,
 static int discovery_resp_handler(const struct bt_mesh_model *model,
                                    struct bt_mesh_msg_ctx *ctx,
                                    struct net_buf_simple *buf);
+static int beacon_handler(const struct bt_mesh_model *model,
+                          struct bt_mesh_msg_ctx *ctx,
+                          struct net_buf_simple *buf);
 static int hid_cmd_handler(const struct bt_mesh_model *model,
                            struct bt_mesh_msg_ctx *ctx,
                            struct net_buf_simple *buf);
@@ -143,6 +142,7 @@ static int decrypt_message(mesh_peer_t *peer, const uint8_t *ciphertext, size_t 
 static const struct bt_mesh_model_op mesh_hid_ops[] = {
     { MESH_HID_OP_DISCOVERY, 0, discovery_handler },
     { MESH_HID_OP_DISCOVERY_RESP, 0, discovery_resp_handler },
+    { MESH_HID_OP_BEACON, 0, beacon_handler },  /* One-way presence broadcast */
     { MESH_HID_OP_HID_CMD, 0, hid_cmd_handler },
     { MESH_HID_OP_STATUS, 0, status_handler },
     { MESH_HID_OP_TEXT, 0, text_handler },
@@ -170,26 +170,16 @@ static struct bt_mesh_model_pub mesh_hid_pub = {
 /* Config client instance */
 static struct bt_mesh_cfg_cli cfg_cli = {};
 
-/* Keys array for vendor model */
-static uint16_t vnd_keys[CONFIG_BT_MESH_MODEL_KEY_COUNT];
-static uint16_t vnd_groups[CONFIG_BT_MESH_MODEL_GROUP_COUNT];
-
 /* Model definitions */
 static struct bt_mesh_model root_models[] = {
     BT_MESH_MODEL_CFG_SRV,
     BT_MESH_MODEL_CFG_CLI(&cfg_cli),
 };
 
+/* Vendor model using standard macro for proper initialization */
 static struct bt_mesh_model vendor_models[] = {
-    {
-        .vnd = { .company = MESH_HID_COMPANY_ID, .id = MESH_HID_MODEL_ID },
-        .op = mesh_hid_ops,
-        .pub = &mesh_hid_pub,
-        .keys = vnd_keys,
-        .keys_cnt = ARRAY_SIZE(vnd_keys),
-        .groups = vnd_groups,
-        .groups_cnt = ARRAY_SIZE(vnd_groups),
-    },
+    BT_MESH_MODEL_VND_CB(MESH_HID_COMPANY_ID, MESH_HID_MODEL_ID,
+                         mesh_hid_ops, &mesh_hid_pub, NULL, NULL),
 };
 
 /* Element definition */
@@ -349,6 +339,43 @@ static int discovery_resp_handler(const struct bt_mesh_model *model,
     if (msg_callback) {
         msg_callback(ctx->addr, MESH_MSG_DISCOVERY_RESP, buf->data, buf->len);
     }
+
+    return 0;
+}
+
+/**
+ * Handle beacon - one-way presence broadcast, just add sender as peer
+ * No response needed - simpler and more reliable than request/response discovery
+ */
+static int beacon_handler(const struct bt_mesh_model *model,
+                          struct bt_mesh_msg_ctx *ctx,
+                          struct net_buf_simple *buf)
+{
+    /* Ignore our own beacons */
+    if (ctx->addr == mesh_hid_get_addr()) {
+        return 0;
+    }
+
+    char data[128];
+    snprintf(data, sizeof(data), "\"from\":\"0x%04x\",\"rssi\":%d",
+        ctx->addr, ctx->recv_rssi);
+    jsonl_serial_send_event("beacon_rcvd", data);
+
+    if (buf->len < sizeof(mesh_discovery_t)) {
+        /* Short beacon - still add peer with minimal info */
+        update_peer(ctx->addr, ctx->recv_rssi, 0);
+        return 0;
+    }
+
+    mesh_discovery_t *beacon = (mesh_discovery_t *)buf->data;
+
+    /* Add/update peer */
+    update_peer(ctx->addr, ctx->recv_rssi, beacon->capabilities);
+    if (beacon->name_len > 0) {
+        update_peer_name(ctx->addr, beacon->name, beacon->name_len);
+    }
+
+    LOG_INF("Beacon from 0x%04x: %s (rssi=%d)", ctx->addr, beacon->name, ctx->recv_rssi);
 
     return 0;
 }
@@ -757,7 +784,7 @@ uint16_t mesh_hid_get_addr(void)
 }
 
 /**
- * Send discovery broadcast
+ * Send discovery broadcast (request/response mode - triggers responses)
  */
 int mesh_hid_send_discovery(void)
 {
@@ -772,12 +799,65 @@ int mesh_hid_send_discovery(void)
     struct bt_mesh_msg_ctx ctx = {
         .net_idx = 0,
         .app_idx = 0,
-        .addr = BT_MESH_ADDR_ALL_NODES,
+        .addr = MESH_GROUP_ADDR,  /* Use group address that models subscribe to */
         .send_ttl = MESH_TTL_DEFAULT,
     };
 
-    LOG_INF("Sending discovery broadcast");
+    LOG_INF("Sending discovery to group 0x%04x", MESH_GROUP_ADDR);
     return bt_mesh_model_send(&vendor_models[0], &ctx, &msg, NULL, NULL);
+}
+
+/**
+ * Send beacon broadcast (one-way presence announcement - no responses)
+ * More reliable than request/response since there's no response collision
+ */
+int mesh_hid_send_beacon(void)
+{
+    int err;
+
+    if (!bt_mesh_is_provisioned()) {
+        LOG_WRN("Not provisioned");
+        return -ENOENT;
+    }
+
+    /* Log model configuration for debugging */
+    LOG_INF("Beacon send - model keys[0]=%u (expect 0), groups[0]=0x%04x (expect 0x%04x)",
+            vendor_models[0].keys[0], vendor_models[0].groups[0], MESH_GROUP_ADDR);
+    LOG_INF("Beacon send - app_key_bound=%d, app_key_exists=%d",
+            app_key_bound, bt_mesh_app_key_exists(0));
+
+    /* Build beacon with our node info (same format as discovery response) */
+    BT_MESH_MODEL_BUF_DEFINE(msg, MESH_HID_OP_BEACON, sizeof(mesh_discovery_t));
+    bt_mesh_model_msg_init(&msg, MESH_HID_OP_BEACON);
+
+    static mesh_discovery_t beacon;  /* Static to avoid stack overflow */
+    memcpy(beacon.uuid, dev_uuid, 16);
+    beacon.capabilities = MESH_CAP_RELAY | MESH_CAP_USB_HOST;
+    beacon.tx_power = 0;  /* TODO: get actual TX power */
+
+    const char *name = mesh_hid_get_name();
+    beacon.name_len = strlen(name);
+    if (beacon.name_len > sizeof(beacon.name) - 1) {
+        beacon.name_len = sizeof(beacon.name) - 1;
+    }
+    memcpy(beacon.name, name, beacon.name_len);
+    beacon.name[beacon.name_len] = '\0';
+
+    net_buf_simple_add_mem(&msg, &beacon, sizeof(beacon));
+
+    struct bt_mesh_msg_ctx ctx = {
+        .net_idx = 0,
+        .app_idx = 0,
+        .addr = MESH_GROUP_ADDR,  /* Use group address that models subscribe to */
+        .send_ttl = MESH_TTL_DEFAULT,
+    };
+
+    LOG_INF("Sending beacon to group 0x%04x", MESH_GROUP_ADDR);
+    err = bt_mesh_model_send(&vendor_models[0], &ctx, &msg, NULL, NULL);
+    if (err) {
+        LOG_ERR("bt_mesh_model_send failed: %d", err);
+    }
+    return err;
 }
 
 /**
@@ -976,35 +1056,44 @@ void mesh_hid_set_callback(mesh_msg_callback_t callback)
 }
 
 /**
- * Directly bind app key to model (bypasses Config Client)
- * Uses internal mesh APIs to add app key and bind to model.
+ * Bind app key to model.
+ * Uses public bt_mesh_app_key_add for key database, then direct array
+ * modification for model binding (same approach as Config Server).
  */
 static void bind_app_key_direct(void)
 {
-    int err;
-    struct bt_mesh_subnet *subnet;
+    uint8_t status;
 
-    /* Get subnet 0 */
-    subnet = bt_mesh_subnet_get(0);
-    if (!subnet) {
-        LOG_ERR("Subnet 0 not found");
-        jsonl_serial_send_event("app_key_binding", "\"state\":\"no_subnet\"");
+    if (!bt_mesh_is_provisioned()) {
+        LOG_ERR("Not provisioned yet, will retry");
+        jsonl_serial_send_event("app_key_binding", "\"state\":\"not_provisioned\",\"retry\":true");
+        k_work_schedule(&app_key_work, K_SECONDS(5));
         return;
     }
 
-    /* Add app key using internal API */
-    err = bt_mesh_app_key_add(0, 0, app_key);  /* app_idx=0, net_idx=0 */
-    if (err && err != -EALREADY) {
-        LOG_ERR("App key add failed: %d", err);
-        char data[48];
-        snprintf(data, sizeof(data), "\"state\":\"add_failed\",\"err\":%d", err);
+    /* Step 1: Add app key to mesh key database using public API
+     * Returns status: 0=success, others=error per Mesh spec */
+    status = bt_mesh_app_key_add(0, 0, app_key);  /* app_idx=0, net_idx=0 */
+    if (status != 0x00 && status != 0x02) {  /* 0x02 = key already exists */
+        LOG_ERR("App key add failed: status=0x%02x, will retry", status);
+        char data[64];
+        snprintf(data, sizeof(data), "\"state\":\"add_failed\",\"status\":\"0x%02x\",\"retry\":true", status);
         jsonl_serial_send_event("app_key_binding", data);
+        k_work_schedule(&app_key_work, K_SECONDS(5));
         return;
     }
-    LOG_INF("App key added (err=%d)", err);
+    LOG_INF("App key added to database (status=0x%02x)", status);
 
-    /* Set app key index 0 as bound to vendor model */
-    vnd_keys[0] = 0;  /* App key index 0 */
+    /* Step 2: Bind app key to vendor model (direct array modification)
+     * This is the same approach used by Config Server's mod_bind() */
+    vendor_models[0].keys[0] = 0;  /* App key index 0 */
+    LOG_INF("App key 0 bound to vendor model");
+
+    /* Step 3: Subscribe model to group address (direct array modification)
+     * This is the same approach used by Config Server's mod_sub_add() */
+    vendor_models[0].groups[0] = MESH_GROUP_ADDR;  /* 0xC000 */
+    LOG_INF("Model subscribed to group 0x%04x", MESH_GROUP_ADDR);
+
     app_key_bound = true;
     LOG_INF("Direct app key binding complete");
     jsonl_serial_send_event("app_key_binding", "\"state\":\"success\"");
@@ -1021,7 +1110,9 @@ static void app_key_work_handler(struct k_work *work)
     ARG_UNUSED(work);
 
     if (!bt_mesh_is_provisioned()) {
-        LOG_WRN("Not provisioned, skipping app key bind");
+        LOG_WRN("Not provisioned yet, will retry app key bind");
+        /* Retry in 5 seconds - provisioning might still be in progress */
+        k_work_schedule(&app_key_work, K_SECONDS(5));
         return;
     }
 
@@ -1043,18 +1134,32 @@ static void discovery_work_handler(struct k_work *work)
 {
     ARG_UNUSED(work);
 
-    if (!bt_mesh_is_provisioned() || !app_key_bound) {
-        LOG_WRN("Not ready for discovery (prov=%d, appkey=%d)",
-            bt_mesh_is_provisioned(), app_key_bound);
+    if (!bt_mesh_is_provisioned()) {
+        LOG_WRN("Not provisioned, will retry discovery");
+        if (periodic_discovery_enabled && discovery_interval_ms > 0) {
+            k_work_schedule(&discovery_work, K_SECONDS(10));
+        }
         return;
     }
 
-    LOG_INF("Auto-discovery: sending discovery broadcast...");
-    int err = mesh_hid_send_discovery();
+    if (!app_key_bound) {
+        LOG_WRN("App key not bound - attempting self-heal");
+        jsonl_serial_send_event("self_heal", "\"action\":\"rebind_app_key\"");
+        /* Try to bind app key, then discovery will run after */
+        k_work_schedule(&app_key_work, K_MSEC(100));
+        /* Also reschedule discovery in case binding still fails */
+        if (periodic_discovery_enabled && discovery_interval_ms > 0) {
+            k_work_schedule(&discovery_work, K_SECONDS(15));
+        }
+        return;
+    }
+
+    LOG_INF("Sending periodic beacon...");
+    int err = mesh_hid_send_beacon();
     if (err) {
-        LOG_WRN("Auto-discovery failed: %d", err);
+        LOG_WRN("Beacon failed: %d", err);
     } else {
-        jsonl_serial_send_event("auto_discovery", "\"sent\":true");
+        jsonl_serial_send_event("beacon", "\"sent\":true");
     }
 
     /* Mark stale peers */

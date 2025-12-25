@@ -12,6 +12,7 @@
 #include <zephyr/drivers/uart.h>
 #include <zephyr/sys/ring_buffer.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/reboot.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -215,10 +216,11 @@ static void handle_local_command(const char *line, size_t len)
         snprintf(data, sizeof(data), "\"uptime_ms\":%lld", k_uptime_get());
         jsonl_serial_send_event("pong", data);
     }
-    else if (strstr(line, "\"cmd\":\"info\"")) {
-        char data[128];
+    else if (strstr(line, "\"cmd\":\"info\"") || strstr(line, "\"cmd\":\"version\"")) {
+        char data[192];
         snprintf(data, sizeof(data),
-            "\"device\":\"HID-HOP\",\"version\":\"1.0\",\"serial_enabled\":%s",
+            "\"device\":\"HID-HOP\",\"version\":\"%s\",\"git\":\"%s\",\"build\":\"%s\",\"serial_enabled\":%s",
+            APP_VERSION, APP_GIT_HASH, APP_BUILD_TIME,
             enabled ? "true" : "false");
         jsonl_serial_send_event("info", data);
     }
@@ -255,9 +257,31 @@ static void handle_local_command(const char *line, size_t len)
             jsonl_serial_send_event("mesh_discover", "\"sent\":true");
         }
     }
+    else if (strstr(line, "\"cmd\":\"beacon\"")) {
+        int err = mesh_hid_send_beacon();
+        char data[128];
+        if (err) {
+            snprintf(data, sizeof(data),
+                     "\"error\":%d,\"app_key_bound\":%s,\"provisioned\":%s",
+                     err,
+                     mesh_hid_app_key_bound() ? "true" : "false",
+                     mesh_hid_is_provisioned() ? "true" : "false");
+            jsonl_serial_send_event("beacon", data);
+        } else {
+            snprintf(data, sizeof(data),
+                     "\"sent\":true,\"app_key_bound\":%s",
+                     mesh_hid_app_key_bound() ? "true" : "false");
+            jsonl_serial_send_event("beacon", data);
+        }
+    }
     else if (strstr(line, "\"cmd\":\"mesh_reset\"")) {
         mesh_hid_reset();
         jsonl_serial_send_event("mesh_reset", "\"done\":true,\"reboot_required\":true");
+    }
+    else if (strstr(line, "\"cmd\":\"reboot\"")) {
+        jsonl_serial_send_event("reboot", "\"rebooting\":true");
+        k_msleep(100);  /* Let the message send */
+        sys_reboot(SYS_REBOOT_COLD);
     }
     else if (strstr(line, "\"cmd\":\"mesh_ping\"")) {
         /* Parse target address: {"cmd":"mesh_ping","addr":"0x1c04"} */
