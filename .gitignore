@@ -17,6 +17,9 @@ build/
 .DS_Store
 ._*
 
+# Node
+node_modules/
+
 # Claude
 .claude/
 CLAUDE.md
