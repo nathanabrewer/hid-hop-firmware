@@ -9,6 +9,8 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/drivers/flash.h>
 #include <zephyr/storage/flash_map.h>
+#include <zephyr/bluetooth/bluetooth.h>
+#include <zephyr/random/random.h>
 #include <string.h>
 #include <stddef.h>
 
@@ -18,9 +20,9 @@
 
 LOG_MODULE_REGISTER(config, LOG_LEVEL_INF);
 
-/* Storage partition ID */
-#define STORAGE_PARTITION       storage_partition
-#define STORAGE_PARTITION_ID    FIXED_PARTITION_ID(STORAGE_PARTITION)
+/* Config partition ID - separate from NVS storage for isolation */
+#define CONFIG_PARTITION        config_partition
+#define CONFIG_PARTITION_ID     FIXED_PARTITION_ID(CONFIG_PARTITION)
 
 /* Hip-hop inspired default names - picked randomly on first boot */
 /* Keep names SHORT (<12 chars) to fit in BLE advertising packet */
@@ -71,7 +73,7 @@ static int erase_storage_partition(void)
 
     LOG_WRN("Erasing storage partition...");
 
-    rc = flash_area_open(STORAGE_PARTITION_ID, &fa);
+    rc = flash_area_open(CONFIG_PARTITION_ID, &fa);
     if (rc) {
         LOG_ERR("Failed to open storage partition: %d", rc);
         return rc;
@@ -184,7 +186,7 @@ static bool read_config_from_flash(void)
     int rc;
     config_flash_t flash_data;
 
-    rc = flash_area_open(STORAGE_PARTITION_ID, &fa);
+    rc = flash_area_open(CONFIG_PARTITION_ID, &fa);
     if (rc) {
         LOG_ERR("Cannot open storage partition: %d", rc);
         return false;
@@ -257,7 +259,7 @@ static int write_config_to_flash(void)
     size_t crc_data_len = offsetof(config_flash_t, crc32);
     flash_data.crc32 = calc_crc32((uint8_t *)&flash_data, crc_data_len);
 
-    rc = flash_area_open(STORAGE_PARTITION_ID, &fa);
+    rc = flash_area_open(CONFIG_PARTITION_ID, &fa);
     if (rc) {
         LOG_ERR("Cannot open storage partition: %d", rc);
         return rc;
@@ -288,20 +290,30 @@ static int write_config_to_flash(void)
 
 /**
  * Generate a random hip-hop name with 4-char suffix for uniqueness
- * Format: "Name-XXXX" where X is alphanumeric
+ * Format: "Name XXXX" where X is alphanumeric
+ * Uses hardware RNG for true randomness (not cycle counter which is deterministic)
  */
 static void generate_random_hiphop_name(char *buf, size_t buf_size)
 {
     static const char alphanum[] = "0123456789ABCDEFGHJKLMNPQRSTUVWXYZ"; /* No I/O to avoid confusion */
-    uint32_t rand_val = k_cycle_get_32();  /* Use cycle counter as entropy */
+
+    /* Use hardware RNG for proper entropy - nRF52840 has true RNG */
+    uint32_t rand_val;
+    if (sys_csrand_get(&rand_val, sizeof(rand_val)) != 0) {
+        /* Fallback: use BLE address XOR'd with cycle count for uniqueness */
+        bt_addr_le_t addr;
+        bt_id_get(&addr, NULL);
+        rand_val = (addr.a.val[0] | (addr.a.val[1] << 8) |
+                    (addr.a.val[2] << 16) | (addr.a.val[3] << 24)) ^ k_cycle_get_32();
+    }
 
     /* Pick a random base name */
     const char *base = hiphop_names[rand_val % NUM_HIPHOP_NAMES];
 
-    /* Generate 4 random alphanumeric chars */
+    /* Generate 4 random alphanumeric chars using LCG seeded by true random */
     char suffix[5];
     for (int i = 0; i < 4; i++) {
-        rand_val = rand_val * 1103515245 + 12345;  /* Simple LCG for more randomness */
+        rand_val = rand_val * 1103515245 + 12345;  /* LCG seeded by HW RNG */
         suffix[i] = alphanum[rand_val % (sizeof(alphanum) - 1)];
     }
     suffix[4] = '\0';

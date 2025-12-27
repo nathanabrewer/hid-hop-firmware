@@ -313,9 +313,12 @@ static int discovery_resp_handler(const struct bt_mesh_model *model,
         return 0;
     }
 
+    /* DEBUG v2: Print first bytes to identify if this is a misrouted KEY_EXCHANGE */
     char data[192];
-    snprintf(data, sizeof(data), "\"from\":\"0x%04x\",\"rssi\":%d,\"len\":%d",
-        ctx->addr, ctx->recv_rssi, buf->len);
+    uint8_t b0 = buf->len > 0 ? buf->data[0] : 0;
+    uint8_t b1 = buf->len > 1 ? buf->data[1] : 0;
+    snprintf(data, sizeof(data), "\"from\":\"0x%04x\",\"rssi\":%d,\"len\":%d,\"b0\":%d,\"b1\":%d,\"v\":2",
+        ctx->addr, ctx->recv_rssi, buf->len, b0, b1);
     jsonl_serial_send_event("discovery_resp_rcvd", data);
 
     if (buf->len < sizeof(mesh_discovery_t)) {
@@ -1330,6 +1333,11 @@ static void update_peer(uint16_t addr, int8_t rssi, uint8_t caps)
         peers[peer_count].name[0] = '\0';
         peers[peer_count].authenticated = false;
         peers[peer_count].auth_expires = 0;
+        /* Initialize E2E encryption state */
+        peers[peer_count].has_session_key = false;
+        memset(peers[peer_count].session_key, 0, sizeof(peers[peer_count].session_key));
+        peers[peer_count].tx_counter = 0;
+        peers[peer_count].rx_counter = 0;
         peer_count++;
         LOG_INF("Added peer 0x%04x (count=%d)", addr, peer_count);
     }
@@ -1682,6 +1690,11 @@ static int key_exchange_handler(const struct bt_mesh_model *model,
                                 struct bt_mesh_msg_ctx *ctx,
                                 struct net_buf_simple *buf)
 {
+    /* Debug: confirm handler is being called */
+    char dbg[64];
+    snprintf(dbg, sizeof(dbg), "\"from\":\"0x%04x\",\"len\":%d", ctx->addr, buf->len);
+    jsonl_serial_send_event("key_exchange_rcvd", dbg);
+
     if (buf->len != 16) {
         LOG_WRN("Invalid key exchange from 0x%04x: len=%d", ctx->addr, buf->len);
         return -EINVAL;
@@ -1695,15 +1708,9 @@ static int key_exchange_handler(const struct bt_mesh_model *model,
     /* Update peer tracking */
     update_peer(ctx->addr, ctx->recv_rssi, 0);
 
-    /* Check if peer is PIN authenticated */
-    if (!mesh_hid_is_peer_authenticated(ctx->addr)) {
-        LOG_WRN("Key exchange rejected - peer 0x%04x not authenticated", ctx->addr);
-        char event_data[96];
-        snprintf(event_data, sizeof(event_data),
-            "\"from\":\"0x%04x\",\"error\":\"not_authenticated\"", ctx->addr);
-        jsonl_serial_send_event("key_exchange_rejected", event_data);
-        return -EACCES;
-    }
+    /* NOTE: Key exchange is always allowed - PIN auth is only for HID/GPIO commands.
+     * The PIN is still used as the pre-shared secret for key derivation,
+     * so both peers must have the same PIN configured to derive matching keys. */
 
     /* Generate our challenge */
     uint8_t our_challenge[16];
@@ -1748,13 +1755,14 @@ static int key_exchange_handler(const struct bt_mesh_model *model,
 
     int err = bt_mesh_model_send(model, &reply_ctx, &msg, NULL, NULL);
 
+    /* Debug: confirm KEY_CONFIRM was sent */
     char event_data[96];
     snprintf(event_data, sizeof(event_data),
-        "\"from\":\"0x%04x\",\"rssi\":%d,\"key_established\":true",
-        ctx->addr, ctx->recv_rssi);
-    jsonl_serial_send_event("key_exchange_complete", event_data);
+        "\"to\":\"0x%04x\",\"err\":%d,\"key_established\":true",
+        ctx->addr, err);
+    jsonl_serial_send_event("key_confirm_sent", event_data);
 
-    LOG_INF("Session key established with 0x%04x", ctx->addr);
+    LOG_INF("Session key established with 0x%04x (responder), send_err=%d", ctx->addr, err);
     return err;
 }
 
@@ -1766,6 +1774,13 @@ static int key_confirm_handler(const struct bt_mesh_model *model,
                                struct bt_mesh_msg_ctx *ctx,
                                struct net_buf_simple *buf)
 {
+    /* Debug: emit event immediately to confirm handler is reached */
+    char dbg[96];
+    snprintf(dbg, sizeof(dbg),
+        "\"from\":\"0x%04x\",\"len\":%d,\"pending\":%s,\"peer\":\"0x%04x\"",
+        ctx->addr, buf->len, pending_key_exchange ? "true" : "false", pending_key_peer);
+    jsonl_serial_send_event("key_confirm_rcvd", dbg);
+
     if (buf->len != 16) {
         LOG_WRN("Invalid key confirm from 0x%04x: len=%d", ctx->addr, buf->len);
         return -EINVAL;
@@ -1975,6 +1990,11 @@ static int text_enc_handler(const struct bt_mesh_model *model,
                             struct bt_mesh_msg_ctx *ctx,
                             struct net_buf_simple *buf)
 {
+    /* Debug: confirm handler is called */
+    char dbg[64];
+    snprintf(dbg, sizeof(dbg), "\"from\":\"0x%04x\",\"len\":%d", ctx->addr, buf->len);
+    jsonl_serial_send_event("text_enc_handler", dbg);
+
     if (buf->len < 13) {  /* 4-byte counter + 1 char + 8-byte tag minimum */
         LOG_WRN("Encrypted text too short from 0x%04x", ctx->addr);
         return -EINVAL;
@@ -1998,9 +2018,9 @@ static int text_enc_handler(const struct bt_mesh_model *model,
     plaintext[plain_len] = '\0';
 
     char data[160];
-    snprintf(data, sizeof(data), "\"from\":\"0x%04x\",\"rssi\":%d,\"encrypted\":true,\"text\":\"%s\"",
+    snprintf(data, sizeof(data), "\"from\":\"0x%04x\",\"rssi\":%d,\"text\":\"%s\"",
         ctx->addr, ctx->recv_rssi, (char *)plaintext);
-    jsonl_serial_send_event("mesh_text_rcvd", data);
+    jsonl_serial_send_event("mesh_text_enc_rcvd", data);
 
     LOG_INF("Encrypted text from 0x%04x: %s", ctx->addr, (char *)plaintext);
     return 0;
@@ -2010,6 +2030,7 @@ static int text_enc_handler(const struct bt_mesh_model *model,
 
 /**
  * Initiate key exchange with a peer
+ * NOTE: Key exchange is always allowed - PIN auth is only for HID/GPIO commands
  */
 int mesh_hid_key_exchange(uint16_t dst_addr)
 {
@@ -2017,11 +2038,8 @@ int mesh_hid_key_exchange(uint16_t dst_addr)
         return -ENOENT;
     }
 
-    /* Check if peer is authenticated first */
-    if (!mesh_hid_is_peer_authenticated(dst_addr)) {
-        LOG_WRN("Cannot key exchange - peer 0x%04x not authenticated", dst_addr);
-        return -EACCES;
-    }
+    /* Ensure peer is in our table so we can store the session key when KEY_CONFIRM arrives */
+    update_peer(dst_addr, 0, 0);
 
     /* Generate our challenge */
     sys_csrand_get(local_challenge, sizeof(local_challenge));
