@@ -483,6 +483,53 @@ static void handle_local_command(const char *line, size_t len)
             jsonl_serial_send_error("missing id", "gpio_blink");
         }
     }
+    else if (strstr(line, "\"cmd\":\"rc_status\"")) {
+        /* Get RC PWM channel status */
+        char data[128];
+        snprintf(data, sizeof(data),
+            "\"rc_count\":%d,\"ch0_us\":%d,\"ch1_us\":%d,\"center_us\":%d,\"min_us\":%d,\"max_us\":%d",
+            GPIO_RC_COUNT,
+            GPIO_RC_COUNT > 0 ? gpio_rc_get(0) : 0,
+            GPIO_RC_COUNT > 1 ? gpio_rc_get(1) : 0,
+            RC_PWM_CENTER_US, RC_PWM_MIN_US, RC_PWM_MAX_US);
+        jsonl_serial_send_event("rc_status", data);
+    }
+    else if (strstr(line, "\"cmd\":\"rc_set\"")) {
+        /* {"cmd":"rc_set","ch":0,"us":1500} - set RC channel pulse width */
+        const char *ch_str = strstr(line, "\"ch\":");
+        const char *us_str = strstr(line, "\"us\":");
+        if (ch_str && us_str) {
+            uint8_t ch = (uint8_t)strtol(ch_str + 5, NULL, 10);
+            uint16_t us = (uint16_t)strtol(us_str + 5, NULL, 10);
+            bool ok = gpio_rc_set(ch, us);
+            char data[64];
+            snprintf(data, sizeof(data), "\"ch\":%d,\"us\":%d,\"ok\":%s",
+                ch, us, ok ? "true" : "false");
+            jsonl_serial_send_event("rc_set", data);
+        } else {
+            jsonl_serial_send_error("missing ch or us", "rc_set");
+        }
+    }
+    else if (strstr(line, "\"cmd\":\"rc_center\"")) {
+        /* Center all RC channels */
+        gpio_rc_center_all();
+        char data[64];
+        snprintf(data, sizeof(data), "\"rc_count\":%d,\"center_us\":%d", GPIO_RC_COUNT, RC_PWM_CENTER_US);
+        jsonl_serial_send_event("rc_center", data);
+    }
+    else if (strstr(line, "\"cmd\":\"rc_disable\"")) {
+        /* {"cmd":"rc_disable","ch":0} - disable RC channel */
+        const char *ch_str = strstr(line, "\"ch\":");
+        if (ch_str) {
+            uint8_t ch = (uint8_t)strtol(ch_str + 5, NULL, 10);
+            bool ok = gpio_rc_disable(ch);
+            char data[48];
+            snprintf(data, sizeof(data), "\"ch\":%d,\"ok\":%s", ch, ok ? "true" : "false");
+            jsonl_serial_send_event("rc_disable", data);
+        } else {
+            jsonl_serial_send_error("missing ch", "rc_disable");
+        }
+    }
     else if (strstr(line, "\"cmd\":\"peers\"")) {
         /* List all known peers with stale status */
         int count = mesh_hid_get_peer_count();
@@ -856,7 +903,7 @@ static void handle_local_command(const char *line, size_t len)
         }
     }
     else if (strstr(line, "\"cmd\":\"help\"")) {
-        jsonl_serial_send_event("help", "\"cmds\":[\"ping\",\"status\",\"mesh_status\",\"mesh_discover\",\"mesh_ping\",\"mesh_text\",\"mesh_auth\",\"key_exchange\",\"set_encryption\",\"encryption_status\",\"text_enc\",\"hid_type\",\"hid_type_enc\",\"hid_click\",\"hid_click_enc\",\"hid_move\",\"hid_key\",\"hid_key_enc\",\"hid_media\",\"gpio_status\",\"gpio_led\",\"gpio_toggle\",\"gpio_btn\",\"gpio_blink\",\"mesh_gpio_led\",\"mesh_gpio_toggle\",\"mesh_gpio_blink\",\"mesh_gpio_led_enc\",\"mesh_gpio_toggle_enc\",\"mesh_gpio_blink_enc\",\"peers\",\"peer_info\",\"clear_peers\",\"set_name\",\"get_name\",\"set_pin_required\",\"peer_auth_status\",\"mesh_reset\",\"help\"]");
+        jsonl_serial_send_event("help", "\"cmds\":[\"ping\",\"status\",\"mesh_status\",\"mesh_discover\",\"mesh_ping\",\"mesh_text\",\"mesh_auth\",\"key_exchange\",\"set_encryption\",\"encryption_status\",\"text_enc\",\"hid_type\",\"hid_type_enc\",\"hid_click\",\"hid_click_enc\",\"hid_move\",\"hid_key\",\"hid_key_enc\",\"hid_media\",\"gpio_status\",\"gpio_led\",\"gpio_toggle\",\"gpio_btn\",\"gpio_blink\",\"rc_status\",\"rc_set\",\"rc_center\",\"rc_disable\",\"mesh_gpio_led\",\"mesh_gpio_toggle\",\"mesh_gpio_blink\",\"mesh_gpio_led_enc\",\"mesh_gpio_toggle_enc\",\"mesh_gpio_blink_enc\",\"peers\",\"peer_info\",\"clear_peers\",\"set_name\",\"get_name\",\"set_pin_required\",\"peer_auth_status\",\"mesh_reset\",\"help\"]");
     }
     else {
         /* Unknown command - could be HID command, try to parse */
