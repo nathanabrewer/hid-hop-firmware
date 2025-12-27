@@ -1,0 +1,10 @@
+if BOARD_XIAO_NRF52840
+
+config BOARD
+	default "xiao_nrf52840"
+
+# Adafruit UF2 bootloader - app starts at 0x27000
+config FLASH_LOAD_OFFSET
+	default 0x27000
+
+endif

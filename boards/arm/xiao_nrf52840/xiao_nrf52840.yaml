@@ -1,0 +1,11 @@
+identifier: xiao_nrf52840
+name: Seeed XIAO nRF52840
+type: mcu
+arch: arm
+toolchain:
+  - zephyr
+  - gnuarmemb
+supported:
+  - gpio
+  - usb_device
+  - pwm

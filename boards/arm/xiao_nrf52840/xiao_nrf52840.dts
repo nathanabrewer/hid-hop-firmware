@@ -1,0 +1,205 @@
+/dts-v1/;
+#include <nordic/nrf52840_qiaa.dtsi>
+#include <zephyr/dt-bindings/input/input-event-codes.h>
+
+/ {
+	model = "Seeed XIAO nRF52840";
+	compatible = "seeed,xiao-nrf52840";
+
+	chosen {
+		zephyr,sram = &sram0;
+		zephyr,flash = &flash0;
+		zephyr,code-partition = &slot0_partition;
+		zephyr,console = &cdc_acm_uart;
+	};
+
+	leds {
+		compatible = "gpio-leds";
+		led0: led_0 {
+			gpios = <&gpio0 26 GPIO_ACTIVE_LOW>;
+			label = "Red LED";
+		};
+		led1: led_1 {
+			gpios = <&gpio0 30 GPIO_ACTIVE_LOW>;
+			label = "Green LED";
+		};
+		led2: led_2 {
+			gpios = <&gpio0 6 GPIO_ACTIVE_LOW>;
+			label = "Blue LED";
+		};
+	};
+
+	aliases {
+		led0 = &led0;
+		led1 = &led1;
+		led2 = &led2;
+		led3 = &led0;  /* DK library expects 4 LEDs */
+		pwm-led0 = &pwm_led0;
+	};
+
+	/* PWM LEDs for testing PWM functionality */
+	pwmleds {
+		compatible = "pwm-leds";
+		pwm_led0: pwm_led_0 {
+			pwms = <&pwm0 0 PWM_MSEC(20) PWM_POLARITY_INVERTED>;
+		};
+	};
+
+	/* RC Servo/ESC PWM outputs - directly on GPIO pins */
+	rc_outputs {
+		compatible = "pwm-leds";
+		/* RC Channel 1 - D0/A0 (P0.02) */
+		rc_ch1: rc_channel_1 {
+			pwms = <&pwm1 0 PWM_MSEC(20) PWM_POLARITY_NORMAL>;
+			label = "RC Channel 1";
+		};
+		/* RC Channel 2 - D1/A1 (P0.03) */
+		rc_ch2: rc_channel_2 {
+			pwms = <&pwm1 1 PWM_MSEC(20) PWM_POLARITY_NORMAL>;
+			label = "RC Channel 2";
+		};
+	};
+
+	/* GPIO header - directly accessible pins */
+	gpio_header: gpio_header {
+		compatible = "gpio-leds";  /* Just for easy control */
+		/* D2/A2 (P0.28) */
+		gpio_d2: gpio_d2 {
+			gpios = <&gpio0 28 GPIO_ACTIVE_HIGH>;
+			label = "D2";
+		};
+		/* D3/A3 (P0.29) */
+		gpio_d3: gpio_d3 {
+			gpios = <&gpio0 29 GPIO_ACTIVE_HIGH>;
+			label = "D3";
+		};
+		/* D4/SDA (P0.04) */
+		gpio_d4: gpio_d4 {
+			gpios = <&gpio0 4 GPIO_ACTIVE_HIGH>;
+			label = "D4/SDA";
+		};
+		/* D5/SCL (P0.05) */
+		gpio_d5: gpio_d5 {
+			gpios = <&gpio0 5 GPIO_ACTIVE_HIGH>;
+			label = "D5/SCL";
+		};
+		/* D6/TX (P1.11) */
+		gpio_d6: gpio_d6 {
+			gpios = <&gpio1 11 GPIO_ACTIVE_HIGH>;
+			label = "D6/TX";
+		};
+		/* D7/RX (P1.12) */
+		gpio_d7: gpio_d7 {
+			gpios = <&gpio1 12 GPIO_ACTIVE_HIGH>;
+			label = "D7/RX";
+		};
+		/* D8/SCK (P1.13) */
+		gpio_d8: gpio_d8 {
+			gpios = <&gpio1 13 GPIO_ACTIVE_HIGH>;
+			label = "D8/SCK";
+		};
+		/* D9/MISO (P1.14) */
+		gpio_d9: gpio_d9 {
+			gpios = <&gpio1 14 GPIO_ACTIVE_HIGH>;
+			label = "D9/MISO";
+		};
+		/* D10/MOSI (P1.15) */
+		gpio_d10: gpio_d10 {
+			gpios = <&gpio1 15 GPIO_ACTIVE_HIGH>;
+			label = "D10/MOSI";
+		};
+	};
+};
+
+&flash0 {
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		/* UF2 bootloader (Adafruit) at 0x0-0x27000 */
+		boot_partition: partition@0 {
+			label = "bootloader";
+			reg = <0x00000000 0x00027000>;
+			read-only;
+		};
+		/* Application starts after bootloader */
+		slot0_partition: partition@27000 {
+			label = "image-0";
+			reg = <0x00027000 0x000b3000>;
+		};
+		/* Config partition for HID-HOP settings */
+		config_partition: partition@da000 {
+			label = "config";
+			reg = <0x000da000 0x00001000>;
+		};
+		/* NVS storage for BLE bonding etc */
+		storage_partition: partition@db000 {
+			label = "storage";
+			reg = <0x000db000 0x00025000>;
+		};
+	};
+};
+
+&gpio0 {
+	status = "okay";
+};
+
+&gpio1 {
+	status = "okay";
+};
+
+&gpiote {
+	status = "okay";
+};
+
+/* PWM0 - for LED control */
+&pwm0 {
+	status = "okay";
+	pinctrl-0 = <&pwm0_default>;
+	pinctrl-1 = <&pwm0_sleep>;
+	pinctrl-names = "default", "sleep";
+};
+
+/* PWM1 - for RC servo/ESC outputs on D0 and D1 */
+&pwm1 {
+	status = "okay";
+	pinctrl-0 = <&pwm1_default>;
+	pinctrl-1 = <&pwm1_sleep>;
+	pinctrl-names = "default", "sleep";
+};
+
+&pinctrl {
+	pwm0_default: pwm0_default {
+		group1 {
+			psels = <NRF_PSEL(PWM_OUT0, 0, 26)>;  /* Red LED */
+		};
+	};
+	pwm0_sleep: pwm0_sleep {
+		group1 {
+			psels = <NRF_PSEL(PWM_OUT0, 0, 26)>;
+			low-power-enable;
+		};
+	};
+	pwm1_default: pwm1_default {
+		group1 {
+			psels = <NRF_PSEL(PWM_OUT0, 0, 2)>,   /* D0/A0 - RC CH1 */
+			        <NRF_PSEL(PWM_OUT1, 0, 3)>;   /* D1/A1 - RC CH2 */
+		};
+	};
+	pwm1_sleep: pwm1_sleep {
+		group1 {
+			psels = <NRF_PSEL(PWM_OUT0, 0, 2)>,
+			        <NRF_PSEL(PWM_OUT1, 0, 3)>;
+			low-power-enable;
+		};
+	};
+};
+
+zephyr_udc0: &usbd {
+	compatible = "nordic,nrf-usbd";
+	status = "okay";
+	cdc_acm_uart: cdc_acm_uart {
+		compatible = "zephyr,cdc-acm-uart";
+	};
+};
