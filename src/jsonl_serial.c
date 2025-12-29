@@ -7,6 +7,7 @@
 #include "jsonl_serial.h"
 #include "mesh_hid.h"
 #include "gpio_control.h"
+#include "device_mode.h"
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/uart.h>
@@ -965,8 +966,46 @@ static void handle_local_command(const char *line, size_t len)
             jsonl_serial_send_error("missing addr or id", "mesh_gpio_blink");
         }
     }
+    else if (strstr(line, "\"cmd\":\"get_mode\"")) {
+        /* Return current mode and list available modes */
+        device_mode_t mode = device_mode_get();
+        const device_mode_info_t *info = device_mode_get_info(mode);
+        char data[256];
+        snprintf(data, sizeof(data),
+            "\"mode\":\"%s\",\"description\":\"%s\",\"modes\":[\"hid\",\"mesh\",\"tunnel\",\"rc\"]",
+            info ? info->name : "unknown",
+            info ? info->description : "");
+        jsonl_serial_send_event("get_mode", data);
+    }
+    else if (strstr(line, "\"cmd\":\"set_mode\"")) {
+        /* {"cmd":"set_mode","mode":"tunnel"} */
+        const char *mode_str = strstr(line, "\"mode\":\"");
+        if (mode_str) {
+            mode_str += 8;
+            char mode_name[16];
+            int i = 0;
+            while (mode_str[i] && mode_str[i] != '"' && i < 15) {
+                mode_name[i] = mode_str[i];
+                i++;
+            }
+            mode_name[i] = '\0';
+            device_mode_t new_mode = device_mode_from_name(mode_name);
+            int err = device_mode_set(new_mode);
+            const device_mode_info_t *info = device_mode_get_info(new_mode);
+            char data[192];
+            snprintf(data, sizeof(data),
+                "\"mode\":\"%s\",\"description\":\"%s\",\"err\":%d,\"reboot_required\":%s",
+                info ? info->name : mode_name,
+                info ? info->description : "",
+                err,
+                err == 0 ? "true" : "false");
+            jsonl_serial_send_event("set_mode", data);
+        } else {
+            jsonl_serial_send_error("missing mode", "set_mode");
+        }
+    }
     else if (strstr(line, "\"cmd\":\"help\"")) {
-        jsonl_serial_send_event("help", "\"cmds\":[\"ping\",\"status\",\"mesh_status\",\"mesh_discover\",\"mesh_ping\",\"mesh_text\",\"mesh_auth\",\"key_exchange\",\"set_encryption\",\"encryption_status\",\"text_enc\",\"hid_type\",\"hid_type_enc\",\"hid_click\",\"hid_click_enc\",\"hid_move\",\"hid_key\",\"hid_key_enc\",\"hid_media\",\"gpio_status\",\"gpio_led\",\"gpio_toggle\",\"gpio_btn\",\"gpio_blink\",\"rc_status\",\"rc_set\",\"rc_center\",\"rc_disable\",\"mesh_gpio_led\",\"mesh_gpio_toggle\",\"mesh_gpio_blink\",\"mesh_gpio_led_enc\",\"mesh_gpio_toggle_enc\",\"mesh_gpio_blink_enc\",\"peers\",\"peer_info\",\"clear_peers\",\"set_name\",\"get_name\",\"set_pin_required\",\"peer_auth_status\",\"mesh_reset\",\"help\"]");
+        jsonl_serial_send_event("help", "\"cmds\":[\"ping\",\"status\",\"mesh_status\",\"mesh_discover\",\"mesh_ping\",\"mesh_text\",\"mesh_auth\",\"key_exchange\",\"set_encryption\",\"encryption_status\",\"text_enc\",\"hid_type\",\"hid_type_enc\",\"hid_click\",\"hid_click_enc\",\"hid_move\",\"hid_key\",\"hid_key_enc\",\"hid_media\",\"gpio_status\",\"gpio_led\",\"gpio_toggle\",\"gpio_btn\",\"gpio_blink\",\"rc_status\",\"rc_set\",\"rc_center\",\"rc_disable\",\"mesh_gpio_led\",\"mesh_gpio_toggle\",\"mesh_gpio_blink\",\"mesh_gpio_led_enc\",\"mesh_gpio_toggle_enc\",\"mesh_gpio_blink_enc\",\"peers\",\"peer_info\",\"clear_peers\",\"set_name\",\"get_name\",\"set_pin_required\",\"peer_auth_status\",\"get_mode\",\"set_mode\",\"mesh_reset\",\"help\"]");
     }
     else {
         /* Unknown command - could be HID command, try to parse */

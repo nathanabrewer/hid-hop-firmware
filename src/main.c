@@ -77,6 +77,7 @@ SYS_INIT(dbg_application, APPLICATION, 99);
 #include "gpio_control.h"
 #include "jsonl_serial.h"
 #include "mesh_hid.h"
+#include "device_mode.h"
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
@@ -418,6 +419,12 @@ int main(void)
     }
     LOG_INF("Step 2: config_init DONE");
 
+    /* Initialize device mode system (loads saved mode from settings) */
+    device_mode_init();
+    device_mode_t mode = device_mode_get();
+    const device_mode_info_t *mode_info = device_mode_get_info(mode);
+    LOG_INF("=== Device Mode: %s ===", mode_info->description);
+
     /* Flash LED 2x = passed config init */
     for (int i = 0; i < 2; i++) {
         dk_set_led_on(STATUS_LED);
@@ -426,7 +433,7 @@ int main(void)
         k_sleep(K_MSEC(200));
     }
 
-    /* Initialize security module */
+    /* Initialize security module (needed for all modes with BLE) */
     LOG_INF("Step 3: security_init...");
     if (!security_init()) {
         LOG_ERR("Security init failed");
@@ -443,22 +450,40 @@ int main(void)
         k_sleep(K_MSEC(200));
     }
 
-    /* DISABLED: GPIO control module - testing if this causes crash */
-    #if 0
-    if (!gpio_control_init()) {
-        LOG_WRN("GPIO control init failed - continuing without GPIO");
+    /* Initialize GPIO control module (for modes with GPIO or RC PWM) */
+    if (device_mode_has_feature(MODE_FEAT_GPIO) || device_mode_has_feature(MODE_FEAT_RC_PWM)) {
+        LOG_INF("Step 3b: gpio_control_init...");
+        if (!gpio_control_init()) {
+            LOG_WRN("GPIO control init failed - continuing without GPIO");
+        } else {
+            LOG_INF("Step 3b: gpio_control_init DONE");
+        }
     }
-    #endif
 
-    /* Initialize USB HID devices */
-    LOG_INF("Step 4: init_usb...");
-    err = init_usb();
-    if (err) {
-        LOG_ERR("USB init failed");
-        dk_set_led_on(ERROR_LED);
-        return err;
+    /* Initialize USB HID devices (only for modes that support USB HID) */
+    if (device_mode_has_feature(MODE_FEAT_USB_HID)) {
+        LOG_INF("Step 4: init_usb (HID)...");
+        err = init_usb();
+        if (err) {
+            LOG_ERR("USB init failed");
+            dk_set_led_on(ERROR_LED);
+            return err;
+        }
+        LOG_INF("Step 4: init_usb DONE");
+    } else if (device_mode_has_feature(MODE_FEAT_USB_CDC)) {
+        /* USB CDC only (no HID) - still need to enable USB */
+        LOG_INF("Step 4: init_usb (CDC only)...");
+        err = usb_enable(NULL);
+        if (err) {
+            LOG_ERR("Failed to enable USB: %d", err);
+            return err;
+        }
+        k_sleep(K_MSEC(500));
+        usb_enabled = true;
+        LOG_INF("Step 4: USB CDC enabled");
+    } else {
+        LOG_INF("Step 4: Skipping USB init (not needed for mode)");
     }
-    LOG_INF("Step 4: init_usb DONE");
 
     /* Flash LED 4x = passed USB init */
     for (int i = 0; i < 4; i++) {
@@ -468,57 +493,67 @@ int main(void)
         k_sleep(K_MSEC(200));
     }
 
-    /* Initialize JSONL serial interface (uses CDC ACM) */
-    LOG_INF("Step 5: jsonl_serial_init...");
-    err = jsonl_serial_init();
-    if (err) {
-        LOG_WRN("JSONL serial init failed: %d (continuing without serial)", err);
-    } else {
-        /* Set callback for routing serial->BLE messages */
-        jsonl_serial_set_ble_callback(serial_to_ble_callback);
-        LOG_INF("Step 5: jsonl_serial_init DONE");
-    }
-
-    /* Initialize BLE and start advertising */
-    LOG_INF("Step 6: ble_hid_service_init...");
-    if (!ble_hid_service_init(ble_command_handler)) {
-        LOG_ERR("BLE init failed");
-        dk_set_led_on(ERROR_LED);
-        return -1;
-    }
-    LOG_INF("Step 6: ble_hid_service_init DONE");
-
-    /* Initialize BLE Mesh */
-    LOG_INF("Step 7: mesh_hid_init...");
-    err = mesh_hid_init();
-    if (err) {
-        LOG_ERR("Mesh init failed: %d", err);
-        /* Non-fatal - continue without mesh */
-    } else {
-        LOG_INF("Step 7: mesh_hid_init DONE");
-
-        /* Register mesh message callback */
-        mesh_hid_set_callback(mesh_msg_handler);
-
-        /* Self-provision as founder if not already provisioned */
-        if (!mesh_hid_is_provisioned()) {
-            LOG_INF("Not provisioned - self-provisioning as founder...");
-            err = mesh_hid_self_provision();
-            if (err && err != -EALREADY) {
-                LOG_WRN("Self-provision failed: %d", err);
-            }
+    /* Initialize JSONL serial interface (only for modes with JSONL CLI) */
+    if (device_mode_has_feature(MODE_FEAT_JSONL_CLI)) {
+        LOG_INF("Step 5: jsonl_serial_init...");
+        err = jsonl_serial_init();
+        if (err) {
+            LOG_WRN("JSONL serial init failed: %d (continuing without serial)", err);
         } else {
-            LOG_INF("Already provisioned, addr=0x%04x", mesh_hid_get_addr());
-            /* Ensure app key is bound (may not be restored from NVS) */
-            mesh_hid_ensure_app_key();
+            /* Set callback for routing serial->BLE messages */
+            jsonl_serial_set_ble_callback(serial_to_ble_callback);
+            LOG_INF("Step 5: jsonl_serial_init DONE");
         }
+    } else {
+        LOG_INF("Step 5: Skipping JSONL serial (not needed for mode)");
+    }
 
-        /* Sync device name to mesh node name for discovery */
-        char device_name[MAX_DEVICE_NAME_LENGTH + 1];
-        if (config_get_name(device_name) > 0) {
-            mesh_hid_set_name(device_name);
-            LOG_INF("Mesh node name set to: %s", device_name);
+    /* Initialize BLE GATT services (needed for all modes) */
+    if (device_mode_has_feature(MODE_FEAT_BLE_GATT)) {
+        LOG_INF("Step 6: ble_hid_service_init...");
+        if (!ble_hid_service_init(ble_command_handler)) {
+            LOG_ERR("BLE init failed");
+            dk_set_led_on(ERROR_LED);
+            return -1;
         }
+        LOG_INF("Step 6: ble_hid_service_init DONE");
+    }
+
+    /* Initialize BLE Mesh (only for modes with mesh support) */
+    if (device_mode_has_feature(MODE_FEAT_BLE_MESH)) {
+        LOG_INF("Step 7: mesh_hid_init...");
+        err = mesh_hid_init();
+        if (err) {
+            LOG_ERR("Mesh init failed: %d", err);
+            /* Non-fatal - continue without mesh */
+        } else {
+            LOG_INF("Step 7: mesh_hid_init DONE");
+
+            /* Register mesh message callback */
+            mesh_hid_set_callback(mesh_msg_handler);
+
+            /* Self-provision as founder if not already provisioned */
+            if (!mesh_hid_is_provisioned()) {
+                LOG_INF("Not provisioned - self-provisioning as founder...");
+                err = mesh_hid_self_provision();
+                if (err && err != -EALREADY) {
+                    LOG_WRN("Self-provision failed: %d", err);
+                }
+            } else {
+                LOG_INF("Already provisioned, addr=0x%04x", mesh_hid_get_addr());
+                /* Ensure app key is bound (may not be restored from NVS) */
+                mesh_hid_ensure_app_key();
+            }
+
+            /* Sync device name to mesh node name for discovery */
+            char device_name[MAX_DEVICE_NAME_LENGTH + 1];
+            if (config_get_name(device_name) > 0) {
+                mesh_hid_set_name(device_name);
+                LOG_INF("Mesh node name set to: %s", device_name);
+            }
+        }
+    } else {
+        LOG_INF("Step 7: Skipping mesh init (not needed for mode)");
     }
 
     LOG_INF("=== Initialization complete - entering main loop ===");
