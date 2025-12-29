@@ -147,12 +147,26 @@ void gpio_rc_center_all(void);
  * @return true on success
  */
 bool gpio_rc_disable(uint8_t channel);
+
+/**
+ * Enable or disable RC failsafe (fade-to-center on signal loss)
+ * @param enabled true to enable failsafe, false to disable
+ */
+void gpio_rc_set_failsafe(bool enabled);
+
+/**
+ * Check if RC failsafe is enabled
+ * @return true if failsafe is enabled
+ */
+bool gpio_rc_failsafe_enabled(void);
 #else
 /* Stub functions when no RC channels available */
 static inline bool gpio_rc_set(uint8_t channel, uint16_t pulse_us) { (void)channel; (void)pulse_us; return false; }
 static inline uint16_t gpio_rc_get(uint8_t channel) { (void)channel; return 0; }
 static inline void gpio_rc_center_all(void) { }
 static inline bool gpio_rc_disable(uint8_t channel) { (void)channel; return false; }
+static inline void gpio_rc_set_failsafe(bool enabled) { (void)enabled; }
+static inline bool gpio_rc_failsafe_enabled(void) { return false; }
 #endif
 
 /* Stub functions for boards without relay/din/ain */

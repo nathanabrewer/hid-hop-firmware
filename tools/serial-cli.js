@@ -24,7 +24,8 @@ function showHelp() {
     console.log('');
     console.log('Discovery & Status:');
     console.log('  peers                          - List all known peers (with stale status)');
-    console.log('  discover                       - Broadcast discovery');
+    console.log('  beacon                         - Broadcast presence beacon');
+    console.log('  discover                       - Broadcast discovery (request/response)');
     console.log('  mesh                           - Get mesh status');
     console.log('  ping <addr>                    - Ping a node');
     console.log('  discovery-settings             - Show periodic discovery settings');
@@ -49,6 +50,10 @@ function showHelp() {
     console.log('  local-led <id> <on|off>        - Set local LED');
     console.log('  local-toggle <id>              - Toggle local LED');
     console.log('  local-blink <id> [count]       - Blink local LED');
+    console.log('');
+    console.log('Diagnostics:');
+    console.log('  diag                           - Run discovery diagnostics');
+    console.log('  watch [seconds]                - Watch for events (default 90s)');
     console.log('');
     console.log('Other:');
     console.log('  name [newname]                 - Get or set node name');
@@ -149,6 +154,9 @@ async function main() {
         }
         else if (input === 'discover') {
             cmd = { cmd: 'mesh_discover' };
+        }
+        else if (input === 'beacon') {
+            cmd = { cmd: 'beacon' };
         }
         else if (input === 'discovery-settings') {
             cmd = { cmd: 'discovery_settings' };
@@ -286,6 +294,52 @@ async function main() {
         }
         else if (input.startsWith('broadcast ')) {
             cmd = { cmd: 'mesh_text', text: input.slice(10) };
+        }
+        else if (input === 'diag') {
+            // Run discovery diagnostics
+            console.log('\n\x1b[33m=== Discovery Diagnostics ===\x1b[0m\n');
+            console.log('1. Getting current status...');
+            port.write(JSON.stringify({ cmd: 'mesh_status' }) + '\n');
+            setTimeout(() => {
+                console.log('\n2. Getting discovery settings...');
+                port.write(JSON.stringify({ cmd: 'discovery_settings' }) + '\n');
+            }, 500);
+            setTimeout(() => {
+                console.log('\n3. Getting peer list...');
+                port.write(JSON.stringify({ cmd: 'peers' }) + '\n');
+            }, 1000);
+            setTimeout(() => {
+                console.log('\n4. Running manual discovery...');
+                port.write(JSON.stringify({ cmd: 'mesh_discover' }) + '\n');
+            }, 1500);
+            setTimeout(() => {
+                console.log('\n5. Getting peer list again (after discovery)...');
+                port.write(JSON.stringify({ cmd: 'peers' }) + '\n');
+            }, 3000);
+            setTimeout(() => {
+                console.log('\n\x1b[33m=== Waiting 70s for periodic discovery ===\x1b[0m');
+                console.log('(Periodic discovery runs every 60s by default)');
+                console.log('Watch for "auto_discovery" event...\n');
+            }, 3500);
+            setTimeout(() => {
+                console.log('\n6. Getting final peer list...');
+                port.write(JSON.stringify({ cmd: 'peers' }) + '\n');
+                console.log('\n\x1b[33m=== Diagnostics complete ===\x1b[0m');
+                console.log('If no "auto_discovery" event appeared, periodic discovery may be broken.\n');
+                rl.prompt();
+            }, 73000);
+            return; // Don't prompt until done
+        }
+        else if (input.startsWith('watch')) {
+            const match = input.match(/^watch(?:\s+(\d+))?$/);
+            const seconds = match && match[1] ? parseInt(match[1]) : 90;
+            console.log(`\n\x1b[33mWatching for events for ${seconds}s...\x1b[0m`);
+            console.log('(Press Ctrl+C to stop early)\n');
+            setTimeout(() => {
+                console.log(`\n\x1b[33mWatch complete (${seconds}s)\x1b[0m\n`);
+                rl.prompt();
+            }, seconds * 1000);
+            return; // Don't prompt until done
         }
         else if (input.startsWith('{')) {
             // Raw JSON

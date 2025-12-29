@@ -68,4 +68,13 @@ void ble_hid_service_disconnect(void);
  */
 bool ble_hid_service_set_name(const char *name);
 
+/**
+ * Send a JSONL message to the connected phone
+ * Used for routing serial messages to BLE
+ * @param json_line The JSON line to send (null-terminated)
+ * @param len Length of the JSON string
+ * @return true on success
+ */
+bool ble_hid_service_send_jsonl(const char *json_line, size_t len);
+
 #endif /* BLE_HID_SERVICE_H */

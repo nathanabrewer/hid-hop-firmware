@@ -258,11 +258,17 @@ typedef struct __attribute__((packed)) {
 #define MAX_PIN_LENGTH 8
 #define MAX_PIN_ATTEMPTS 3   /* SECURITY: Reduced from 5 to 3 */
 
-/* GPIO constraints */
-#define GPIO_LED_COUNT      3
-#define GPIO_RELAY_COUNT    7
-#define GPIO_DIN_COUNT      2
-#define GPIO_AIN_COUNT      2
+/* GPIO constraints - use gpio_control.h defines if available */
+#include "gpio_control.h"
+#ifndef GPIO_RELAY_COUNT
+#define GPIO_RELAY_COUNT    0
+#endif
+#ifndef GPIO_DIN_COUNT
+#define GPIO_DIN_COUNT      0
+#endif
+#ifndef GPIO_AIN_COUNT
+#define GPIO_AIN_COUNT      0
+#endif
 
 /* GPIO set LED command payload */
 typedef struct __attribute__((packed)) {

@@ -460,3 +460,32 @@ bool ble_hid_service_set_name(const char *name)
 
     return true;
 }
+
+/**
+ * Send a JSONL message to the connected phone
+ * Used for routing serial messages to BLE
+ */
+bool ble_hid_service_send_jsonl(const char *json_line, size_t len)
+{
+    if (!initialized || current_conn == NULL) {
+        LOG_DBG("Cannot send JSONL: not connected");
+        return false;
+    }
+
+    if (!resp_notifications_enabled) {
+        LOG_DBG("Cannot send JSONL: notifications not enabled");
+        return false;
+    }
+
+    /* Send as notification on response characteristic */
+    const struct bt_gatt_attr *attr = &hid_bridge_svc.attrs[4];
+
+    int err = bt_gatt_notify(current_conn, attr, json_line, len);
+    if (err) {
+        LOG_ERR("Failed to send JSONL notification (err %d)", err);
+        return false;
+    }
+
+    LOG_DBG("JSONL sent to phone: %zu bytes", len);
+    return true;
+}

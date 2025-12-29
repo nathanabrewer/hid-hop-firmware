@@ -4,6 +4,8 @@
 # Builds, packages, and flashes via USB DFU with port confirmation
 #
 
+reset
+
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -84,7 +84,19 @@ static const struct device *rc_pwm_dev = DEVICE_DT_GET(DT_NODELABEL(pwm1));
 #else
 #define HAS_RC_PWM 0
 #endif
-static uint16_t rc_pulse_us[GPIO_RC_COUNT];  /* Current pulse widths */
+static uint16_t rc_pulse_us[GPIO_RC_COUNT];     /* Current pulse widths */
+static uint32_t rc_last_update[GPIO_RC_COUNT];  /* Last update timestamp (ms) */
+static bool rc_failsafe_enabled = true;         /* Failsafe enabled globally */
+
+/* Failsafe configuration */
+#define RC_FAILSAFE_TIMEOUT_MS   500   /* Time before failsafe kicks in */
+#define RC_FAILSAFE_CHECK_MS     50    /* How often to check for timeout */
+#define RC_FAILSAFE_FADE_STEP    20    /* Microseconds to move per check toward center */
+
+/* Failsafe work queue */
+static struct k_work_delayable rc_failsafe_work;
+
+static void rc_failsafe_handler(struct k_work *work);
 #endif
 
 /* Current LED state tracking */
@@ -177,9 +189,11 @@ bool gpio_control_init(void)
     /* Initialize RC PWM channels */
 #if GPIO_RC_COUNT > 0 && defined(CONFIG_PWM) && HAS_RC_PWM
     if (device_is_ready(rc_pwm_dev)) {
+        uint32_t now = k_uptime_get_32();
         /* Initialize all channels to center position */
         for (int i = 0; i < GPIO_RC_COUNT; i++) {
             rc_pulse_us[i] = RC_PWM_CENTER_US;
+            rc_last_update[i] = now;
             ret = pwm_set(rc_pwm_dev, i, PWM_USEC(RC_PWM_PERIOD_US), PWM_USEC(RC_PWM_CENTER_US), 0);
             if (ret < 0) {
                 LOG_ERR("Failed to init RC channel %d: %d", i, ret);
@@ -187,6 +201,11 @@ bool gpio_control_init(void)
                 LOG_INF("RC channel %d initialized at %dus", i, RC_PWM_CENTER_US);
             }
         }
+        /* Start failsafe watchdog timer */
+        k_work_init_delayable(&rc_failsafe_work, rc_failsafe_handler);
+        k_work_schedule(&rc_failsafe_work, K_MSEC(RC_FAILSAFE_CHECK_MS));
+        LOG_INF("RC failsafe enabled: timeout=%dms, fade=%dus/step",
+                RC_FAILSAFE_TIMEOUT_MS, RC_FAILSAFE_FADE_STEP);
     } else {
         LOG_WRN("RC PWM device not ready");
     }
@@ -332,7 +351,36 @@ void gpio_led_blink(uint8_t led_index, uint8_t count, uint16_t on_ms, uint16_t o
 #if GPIO_RC_COUNT > 0 && defined(CONFIG_PWM) && HAS_RC_PWM
 
 /**
- * Set RC PWM channel pulse width
+ * Internal: Set RC PWM without updating timestamp (used by failsafe)
+ */
+static bool rc_set_internal(uint8_t channel, uint16_t pulse_us)
+{
+    if (!initialized || channel >= GPIO_RC_COUNT) {
+        return false;
+    }
+
+    if (!device_is_ready(rc_pwm_dev)) {
+        return false;
+    }
+
+    /* Clamp pulse width to valid RC range */
+    if (pulse_us < RC_PWM_MIN_US) {
+        pulse_us = RC_PWM_MIN_US;
+    } else if (pulse_us > RC_PWM_MAX_US) {
+        pulse_us = RC_PWM_MAX_US;
+    }
+
+    int ret = pwm_set(rc_pwm_dev, channel, PWM_USEC(RC_PWM_PERIOD_US), PWM_USEC(pulse_us), 0);
+    if (ret < 0) {
+        return false;
+    }
+
+    rc_pulse_us[channel] = pulse_us;
+    return true;
+}
+
+/**
+ * Set RC PWM channel pulse width (resets failsafe timer)
  */
 bool gpio_rc_set(uint8_t channel, uint16_t pulse_us)
 {
@@ -344,6 +392,9 @@ bool gpio_rc_set(uint8_t channel, uint16_t pulse_us)
         LOG_ERR("RC PWM device not ready");
         return false;
     }
+
+    /* Update timestamp - this resets the failsafe timer for this channel */
+    rc_last_update[channel] = k_uptime_get_32();
 
     /* Clamp pulse width to valid RC range */
     if (pulse_us < RC_PWM_MIN_US) {
@@ -408,6 +459,78 @@ bool gpio_rc_disable(uint8_t channel)
     rc_pulse_us[channel] = 0;
     LOG_INF("RC channel %d disabled", channel);
     return true;
+}
+
+/**
+ * Failsafe watchdog handler - fades channels to center if no updates received
+ */
+static void rc_failsafe_handler(struct k_work *work)
+{
+    if (!initialized || !rc_failsafe_enabled) {
+        /* Reschedule even if disabled, so we can re-enable later */
+        k_work_schedule(&rc_failsafe_work, K_MSEC(RC_FAILSAFE_CHECK_MS));
+        return;
+    }
+
+    uint32_t now = k_uptime_get_32();
+
+    for (int i = 0; i < GPIO_RC_COUNT; i++) {
+        uint32_t elapsed = now - rc_last_update[i];
+
+        if (elapsed >= RC_FAILSAFE_TIMEOUT_MS) {
+            uint16_t current = rc_pulse_us[i];
+
+            /* Already at center? Nothing to do */
+            if (current == RC_PWM_CENTER_US) {
+                continue;
+            }
+
+            /* Fade toward center */
+            uint16_t new_val;
+            if (current > RC_PWM_CENTER_US) {
+                /* Above center - decrease */
+                if (current - RC_PWM_CENTER_US <= RC_FAILSAFE_FADE_STEP) {
+                    new_val = RC_PWM_CENTER_US;
+                } else {
+                    new_val = current - RC_FAILSAFE_FADE_STEP;
+                }
+            } else {
+                /* Below center - increase */
+                if (RC_PWM_CENTER_US - current <= RC_FAILSAFE_FADE_STEP) {
+                    new_val = RC_PWM_CENTER_US;
+                } else {
+                    new_val = current + RC_FAILSAFE_FADE_STEP;
+                }
+            }
+
+            /* Use internal set to avoid resetting timestamp */
+            rc_set_internal(i, new_val);
+
+            if (new_val == RC_PWM_CENTER_US) {
+                LOG_WRN("RC ch%d failsafe: centered after %dms timeout", i, elapsed);
+            }
+        }
+    }
+
+    /* Reschedule */
+    k_work_schedule(&rc_failsafe_work, K_MSEC(RC_FAILSAFE_CHECK_MS));
+}
+
+/**
+ * Enable or disable RC failsafe
+ */
+void gpio_rc_set_failsafe(bool enabled)
+{
+    rc_failsafe_enabled = enabled;
+    LOG_INF("RC failsafe %s", enabled ? "enabled" : "disabled");
+}
+
+/**
+ * Check if RC failsafe is enabled
+ */
+bool gpio_rc_failsafe_enabled(void)
+{
+    return rc_failsafe_enabled;
 }
 
 #endif /* GPIO_RC_COUNT > 0 */
