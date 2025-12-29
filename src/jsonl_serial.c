@@ -484,15 +484,40 @@ static void handle_local_command(const char *line, size_t len)
         }
     }
     else if (strstr(line, "\"cmd\":\"rc_status\"")) {
-        /* Get RC PWM channel status */
-        char data[128];
+        /* Get RC PWM channel status with mode info */
+        char data[256];
+        uint8_t mode = mesh_hid_get_rc_mode();
+        uint8_t invert = mesh_hid_get_rc_invert();
         snprintf(data, sizeof(data),
-            "\"rc_count\":%d,\"ch0_us\":%d,\"ch1_us\":%d,\"center_us\":%d,\"min_us\":%d,\"max_us\":%d",
+            "\"rc_count\":%d,\"ch0_us\":%d,\"ch1_us\":%d,\"center_us\":%d,\"min_us\":%d,\"max_us\":%d,"
+            "\"failsafe\":%s,\"mode\":\"%s\",\"invert_ch0\":%s,\"invert_ch1\":%s,\"swap\":%s",
             GPIO_RC_COUNT,
             GPIO_RC_COUNT > 0 ? gpio_rc_get(0) : 0,
             GPIO_RC_COUNT > 1 ? gpio_rc_get(1) : 0,
-            RC_PWM_CENTER_US, RC_PWM_MIN_US, RC_PWM_MAX_US);
+            RC_PWM_CENTER_US, RC_PWM_MIN_US, RC_PWM_MAX_US,
+            gpio_rc_failsafe_enabled() ? "true" : "false",
+            mode == MESH_RC_MODE_SKID_STEER ? "skid_steer" : "normal",
+            (invert & MESH_RC_INVERT_CH0) ? "true" : "false",
+            (invert & MESH_RC_INVERT_CH1) ? "true" : "false",
+            (invert & MESH_RC_SWAP_CHANNELS) ? "true" : "false");
         jsonl_serial_send_event("rc_status", data);
+    }
+    else if (strstr(line, "\"cmd\":\"rc_failsafe\"")) {
+        /* {"cmd":"rc_failsafe","enabled":true} - enable/disable failsafe */
+        const char *enabled_str = strstr(line, "\"enabled\":");
+        if (enabled_str) {
+            bool enabled = strstr(enabled_str, "true") != NULL;
+            gpio_rc_set_failsafe(enabled);
+            char data[48];
+            snprintf(data, sizeof(data), "\"failsafe\":%s", enabled ? "true" : "false");
+            jsonl_serial_send_event("rc_failsafe", data);
+        } else {
+            /* No enabled param - just report current state */
+            char data[48];
+            snprintf(data, sizeof(data), "\"failsafe\":%s",
+                gpio_rc_failsafe_enabled() ? "true" : "false");
+            jsonl_serial_send_event("rc_failsafe", data);
+        }
     }
     else if (strstr(line, "\"cmd\":\"rc_set\"")) {
         /* {"cmd":"rc_set","ch":0,"us":1500} - set RC channel pulse width */
@@ -529,6 +554,44 @@ static void handle_local_command(const char *line, size_t len)
         } else {
             jsonl_serial_send_error("missing ch", "rc_disable");
         }
+    }
+    else if (strstr(line, "\"cmd\":\"rc_mode\"")) {
+        /* {"cmd":"rc_mode","mode":"skid_steer"} or {"cmd":"rc_mode"} to query */
+        const char *mode_str = strstr(line, "\"mode\":\"");
+        if (mode_str) {
+            /* Set mode */
+            if (strstr(mode_str, "skid_steer")) {
+                mesh_hid_set_rc_mode(MESH_RC_MODE_SKID_STEER);
+            } else if (strstr(mode_str, "normal")) {
+                mesh_hid_set_rc_mode(MESH_RC_MODE_NORMAL);
+            }
+        }
+        /* Report current mode */
+        char data[96];
+        uint8_t mode = mesh_hid_get_rc_mode();
+        uint8_t invert = mesh_hid_get_rc_invert();
+        snprintf(data, sizeof(data),
+            "\"mode\":\"%s\",\"invert_ch0\":%s,\"invert_ch1\":%s,\"swap\":%s",
+            mode == MESH_RC_MODE_SKID_STEER ? "skid_steer" : "normal",
+            (invert & MESH_RC_INVERT_CH0) ? "true" : "false",
+            (invert & MESH_RC_INVERT_CH1) ? "true" : "false",
+            (invert & MESH_RC_SWAP_CHANNELS) ? "true" : "false");
+        jsonl_serial_send_event("rc_mode", data);
+    }
+    else if (strstr(line, "\"cmd\":\"rc_invert\"")) {
+        /* {"cmd":"rc_invert","ch0":true,"ch1":false,"swap":false} */
+        uint8_t invert = 0;
+        if (strstr(line, "\"ch0\":true")) invert |= MESH_RC_INVERT_CH0;
+        if (strstr(line, "\"ch1\":true")) invert |= MESH_RC_INVERT_CH1;
+        if (strstr(line, "\"swap\":true")) invert |= MESH_RC_SWAP_CHANNELS;
+        mesh_hid_set_rc_invert(invert);
+        char data[64];
+        snprintf(data, sizeof(data),
+            "\"invert_ch0\":%s,\"invert_ch1\":%s,\"swap\":%s",
+            (invert & MESH_RC_INVERT_CH0) ? "true" : "false",
+            (invert & MESH_RC_INVERT_CH1) ? "true" : "false",
+            (invert & MESH_RC_SWAP_CHANNELS) ? "true" : "false");
+        jsonl_serial_send_event("rc_invert", data);
     }
     else if (strstr(line, "\"cmd\":\"peers\"")) {
         /* List all known peers with stale status */

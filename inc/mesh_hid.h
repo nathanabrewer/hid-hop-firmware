@@ -44,6 +44,11 @@
 #define MESH_HID_OP_GPIO_CMD        BT_MESH_MODEL_OP_3(0x08, MESH_HID_COMPANY_ID)
 #define MESH_HID_OP_GPIO_CMD_ENC    BT_MESH_MODEL_OP_3(0x09, MESH_HID_COMPANY_ID)
 
+/* RC PWM control opcodes (for servo/ESC control) */
+#define MESH_HID_OP_RC_VECTOR       BT_MESH_MODEL_OP_3(0x0A, MESH_HID_COMPANY_ID)
+#define MESH_HID_OP_RC_VECTOR_ENC   BT_MESH_MODEL_OP_3(0x0B, MESH_HID_COMPANY_ID)
+#define MESH_HID_OP_RC_CONFIG       BT_MESH_MODEL_OP_3(0x0C, MESH_HID_COMPANY_ID)
+
 /* Maximum mesh message payload */
 #define MESH_HID_MAX_PAYLOAD    64
 
@@ -74,6 +79,20 @@
 #define MESH_GPIO_LED_BLINK     0x02  /* Blink LED */
 #define MESH_GPIO_BTN_READ      0x10  /* Read button state */
 
+/* RC drive modes */
+#define MESH_RC_MODE_NORMAL     0x00  /* Normal: CH0=steering, CH1=throttle */
+#define MESH_RC_MODE_SKID_STEER 0x01  /* Skid steer: left = Y+X, right = Y-X */
+
+/* RC channel inversion flags (bitmask) */
+#define MESH_RC_INVERT_CH0      0x01  /* Invert channel 0 */
+#define MESH_RC_INVERT_CH1      0x02  /* Invert channel 1 */
+#define MESH_RC_SWAP_CHANNELS   0x04  /* Swap CH0 and CH1 output */
+
+/* RC vector control constants */
+#define MESH_RC_VECTOR_MIN      (-1000)  /* Min joystick value */
+#define MESH_RC_VECTOR_MAX      1000     /* Max joystick value */
+#define MESH_RC_VECTOR_CENTER   0        /* Center/neutral */
+
 /**
  * HID command packet format (sent over mesh)
  */
@@ -82,6 +101,34 @@ typedef struct __attribute__((packed)) {
     uint8_t action;     /* Type-specific action */
     uint8_t data[60];   /* Variable payload */
 } mesh_hid_cmd_t;
+
+/**
+ * RC vector control packet format
+ * Sent from mobile app, chip does mixing based on drive mode
+ *
+ * Wire format: 5 bytes
+ *   [0-1] x: int16_t LE, joystick X axis (-1000 to +1000)
+ *   [2-3] y: int16_t LE, joystick Y axis (-1000 to +1000)
+ *   [4]   flags: uint8_t, reserved (set to 0)
+ */
+typedef struct __attribute__((packed)) {
+    int16_t x;          /* X axis: -1000 (left) to +1000 (right) */
+    int16_t y;          /* Y axis: -1000 (back) to +1000 (forward) */
+    uint8_t flags;      /* Reserved for future use */
+} mesh_rc_vector_t;
+
+/**
+ * RC configuration packet format
+ * Sets drive mode and channel inversion
+ *
+ * Wire format: 2 bytes
+ *   [0] mode: uint8_t, MESH_RC_MODE_*
+ *   [1] invert: uint8_t, MESH_RC_INVERT_* flags
+ */
+typedef struct __attribute__((packed)) {
+    uint8_t mode;       /* MESH_RC_MODE_NORMAL or MESH_RC_MODE_SKID_STEER */
+    uint8_t invert;     /* Inversion flags (MESH_RC_INVERT_*) */
+} mesh_rc_config_t;
 
 /* Node capabilities flags */
 #define MESH_CAP_RELAY          0x01
@@ -575,6 +622,67 @@ int mesh_hid_send_gpio_toggle_encrypted(uint16_t dst_addr, uint8_t led_id);
  * @return 0 on success, -ENOENT if no session key
  */
 int mesh_hid_send_gpio_blink_encrypted(uint16_t dst_addr, uint8_t led_id, uint8_t count);
+
+/* ============ RC PWM Control Functions ============ */
+
+/**
+ * Send RC vector control command (plaintext, requires auth)
+ * Chip applies mixing based on configured drive mode
+ *
+ * @param dst_addr  Destination mesh address
+ * @param x         X axis value (-1000 to +1000)
+ * @param y         Y axis value (-1000 to +1000)
+ * @return 0 on success
+ */
+int mesh_hid_send_rc_vector(uint16_t dst_addr, int16_t x, int16_t y);
+
+/**
+ * Send encrypted RC vector control command
+ *
+ * @param dst_addr  Destination mesh address
+ * @param x         X axis value (-1000 to +1000)
+ * @param y         Y axis value (-1000 to +1000)
+ * @return 0 on success, -ENOENT if no session key
+ */
+int mesh_hid_send_rc_vector_encrypted(uint16_t dst_addr, int16_t x, int16_t y);
+
+/**
+ * Send RC configuration command (sets drive mode and inversion)
+ *
+ * @param dst_addr  Destination mesh address
+ * @param mode      Drive mode (MESH_RC_MODE_*)
+ * @param invert    Inversion flags (MESH_RC_INVERT_*)
+ * @return 0 on success
+ */
+int mesh_hid_send_rc_config(uint16_t dst_addr, uint8_t mode, uint8_t invert);
+
+/**
+ * Set local RC drive mode
+ *
+ * @param mode  Drive mode (MESH_RC_MODE_*)
+ */
+void mesh_hid_set_rc_mode(uint8_t mode);
+
+/**
+ * Get current RC drive mode
+ *
+ * @return Current drive mode
+ */
+uint8_t mesh_hid_get_rc_mode(void);
+
+/**
+ * Set local RC channel inversion
+ *
+ * @param invert  Inversion flags (MESH_RC_INVERT_*)
+ */
+void mesh_hid_set_rc_invert(uint8_t invert);
+
+/**
+ * Get current RC channel inversion flags
+ *
+ * @return Current inversion flags
+ */
+uint8_t mesh_hid_get_rc_invert(void);
 
 /**
  * Set periodic discovery interval

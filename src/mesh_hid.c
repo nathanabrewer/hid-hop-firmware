@@ -79,6 +79,10 @@ static uint8_t local_challenge[16];      /* Our challenge for key exchange */
 static bool pending_key_exchange = false;
 static uint16_t pending_key_peer = 0;
 
+/* RC PWM control configuration */
+static uint8_t rc_drive_mode = MESH_RC_MODE_SKID_STEER;  /* Default: skid steer */
+static uint8_t rc_invert_flags = 0;                       /* No inversion by default */
+
 /* Delayed work for app key binding and auto-discovery */
 static struct k_work_delayable app_key_work;
 static struct k_work_delayable discovery_work;
@@ -128,6 +132,15 @@ static int gpio_cmd_handler(const struct bt_mesh_model *model,
 static int gpio_cmd_enc_handler(const struct bt_mesh_model *model,
                                 struct bt_mesh_msg_ctx *ctx,
                                 struct net_buf_simple *buf);
+static int rc_vector_handler(const struct bt_mesh_model *model,
+                             struct bt_mesh_msg_ctx *ctx,
+                             struct net_buf_simple *buf);
+static int rc_vector_enc_handler(const struct bt_mesh_model *model,
+                                 struct bt_mesh_msg_ctx *ctx,
+                                 struct net_buf_simple *buf);
+static int rc_config_handler(const struct bt_mesh_model *model,
+                             struct bt_mesh_msg_ctx *ctx,
+                             struct net_buf_simple *buf);
 static void update_peer(uint16_t addr, int8_t rssi, uint8_t caps);
 static void update_peer_name(uint16_t addr, const char *name, size_t name_len);
 static mesh_peer_t *get_peer_ptr(uint16_t addr);
@@ -156,6 +169,10 @@ static const struct bt_mesh_model_op mesh_hid_ops[] = {
     /* GPIO command handlers (require PIN auth like HID) */
     { MESH_HID_OP_GPIO_CMD, 0, gpio_cmd_handler },
     { MESH_HID_OP_GPIO_CMD_ENC, 0, gpio_cmd_enc_handler },
+    /* RC PWM control handlers */
+    { MESH_HID_OP_RC_VECTOR, 0, rc_vector_handler },
+    { MESH_HID_OP_RC_VECTOR_ENC, 0, rc_vector_enc_handler },
+    { MESH_HID_OP_RC_CONFIG, 0, rc_config_handler },
     BT_MESH_MODEL_OP_END,
 };
 
@@ -2558,6 +2575,343 @@ int mesh_hid_send_gpio_blink_encrypted(uint16_t dst_addr, uint8_t led_id, uint8_
 {
     LOG_INF("Sending encrypted GPIO LED blink to 0x%04x: led=%d count=%d", dst_addr, led_id, count);
     return send_gpio_cmd_encrypted(dst_addr, MESH_GPIO_LED_BLINK, led_id, &count, 1);
+}
+
+/* ========== RC PWM CONTROL ========== */
+
+/**
+ * Convert joystick value (-1000 to +1000) to PWM microseconds (1000-2000)
+ */
+static inline uint16_t rc_value_to_pwm(int16_t value)
+{
+    /* Clamp input */
+    if (value < MESH_RC_VECTOR_MIN) value = MESH_RC_VECTOR_MIN;
+    if (value > MESH_RC_VECTOR_MAX) value = MESH_RC_VECTOR_MAX;
+
+    /* Convert: -1000 -> 1000us, 0 -> 1500us, +1000 -> 2000us */
+    return (uint16_t)(1500 + (value / 2));
+}
+
+/**
+ * Apply drive mode mixing and inversion, then set PWM outputs
+ */
+static void rc_apply_vector(int16_t x, int16_t y)
+{
+    int16_t ch0_value, ch1_value;
+
+    if (rc_drive_mode == MESH_RC_MODE_SKID_STEER) {
+        /* Skid steer: left = Y + X, right = Y - X */
+        ch0_value = y + x;  /* Left motor */
+        ch1_value = y - x;  /* Right motor */
+
+        /* Clamp to valid range */
+        if (ch0_value < MESH_RC_VECTOR_MIN) ch0_value = MESH_RC_VECTOR_MIN;
+        if (ch0_value > MESH_RC_VECTOR_MAX) ch0_value = MESH_RC_VECTOR_MAX;
+        if (ch1_value < MESH_RC_VECTOR_MIN) ch1_value = MESH_RC_VECTOR_MIN;
+        if (ch1_value > MESH_RC_VECTOR_MAX) ch1_value = MESH_RC_VECTOR_MAX;
+    } else {
+        /* Normal mode: CH0 = X (steering), CH1 = Y (throttle) */
+        ch0_value = x;
+        ch1_value = y;
+    }
+
+    /* Apply channel inversion */
+    if (rc_invert_flags & MESH_RC_INVERT_CH0) {
+        ch0_value = -ch0_value;
+    }
+    if (rc_invert_flags & MESH_RC_INVERT_CH1) {
+        ch1_value = -ch1_value;
+    }
+
+    /* Swap channels if requested */
+    if (rc_invert_flags & MESH_RC_SWAP_CHANNELS) {
+        int16_t tmp = ch0_value;
+        ch0_value = ch1_value;
+        ch1_value = tmp;
+    }
+
+    /* Convert to PWM and set outputs */
+    uint16_t pwm0 = rc_value_to_pwm(ch0_value);
+    uint16_t pwm1 = rc_value_to_pwm(ch1_value);
+
+    gpio_rc_set(0, pwm0);
+    gpio_rc_set(1, pwm1);
+
+    LOG_DBG("RC vector x=%d y=%d -> ch0=%d ch1=%d (pwm %d, %d us)",
+            x, y, ch0_value, ch1_value, pwm0, pwm1);
+}
+
+/**
+ * Handle RC vector command (plaintext) - requires PIN auth
+ * Format: [x_lo][x_hi][y_lo][y_hi][flags] (5 bytes)
+ */
+static int rc_vector_handler(const struct bt_mesh_model *model,
+                             struct bt_mesh_msg_ctx *ctx,
+                             struct net_buf_simple *buf)
+{
+    if (buf->len < sizeof(mesh_rc_vector_t)) {
+        LOG_WRN("RC vector command too short from 0x%04x", ctx->addr);
+        return -EINVAL;
+    }
+
+    update_peer(ctx->addr, ctx->recv_rssi, 0);
+
+    /* SECURITY: Reject plaintext when encryption is required */
+    if (encryption_required) {
+        LOG_WRN("Plaintext RC command rejected from 0x%04x - encryption required", ctx->addr);
+        return -EACCES;
+    }
+
+    /* Check PIN authentication */
+    if (pin_required && !mesh_hid_is_peer_authenticated(ctx->addr)) {
+        LOG_WRN("RC command rejected - peer 0x%04x not authenticated", ctx->addr);
+        return -EACCES;
+    }
+
+    /* Parse vector */
+    int16_t x = (int16_t)net_buf_simple_pull_le16(buf);
+    int16_t y = (int16_t)net_buf_simple_pull_le16(buf);
+    uint8_t flags = net_buf_simple_pull_u8(buf);
+    (void)flags; /* Reserved for future use */
+
+    /* Apply mixing and set PWM */
+    rc_apply_vector(x, y);
+
+    /* Send event (but not too often - RC commands come fast) */
+    static uint32_t last_event_time = 0;
+    uint32_t now = k_uptime_get_32();
+    if (now - last_event_time > 500) {  /* Max 2 events/sec */
+        char event_data[96];
+        snprintf(event_data, sizeof(event_data),
+            "\"from\":\"0x%04x\",\"x\":%d,\"y\":%d,\"mode\":\"%s\"",
+            ctx->addr, x, y,
+            rc_drive_mode == MESH_RC_MODE_SKID_STEER ? "skid_steer" : "normal");
+        jsonl_serial_send_event("rc_vector", event_data);
+        last_event_time = now;
+    }
+
+    return 0;
+}
+
+/**
+ * Handle encrypted RC vector command
+ */
+static int rc_vector_enc_handler(const struct bt_mesh_model *model,
+                                 struct bt_mesh_msg_ctx *ctx,
+                                 struct net_buf_simple *buf)
+{
+    /* Minimum: 4-byte counter + 5-byte payload + 8-byte tag = 17 bytes */
+    if (buf->len < 17) {
+        LOG_WRN("Encrypted RC vector too short from 0x%04x", ctx->addr);
+        return -EINVAL;
+    }
+
+    update_peer(ctx->addr, ctx->recv_rssi, 0);
+
+    /* Get peer and check session key */
+    mesh_peer_t *peer = get_peer_ptr(ctx->addr);
+    if (!peer || !peer->has_session_key) {
+        LOG_WRN("No session key for peer 0x%04x", ctx->addr);
+        return -ENOENT;
+    }
+
+    /* Check PIN authentication */
+    if (pin_required && !mesh_hid_is_peer_authenticated(ctx->addr)) {
+        LOG_WRN("Encrypted RC rejected - peer 0x%04x not authenticated", ctx->addr);
+        return -EACCES;
+    }
+
+    /* Decrypt */
+    uint8_t plaintext[16];
+    size_t plain_len;
+    if (decrypt_message(peer, buf->data, buf->len, plaintext, &plain_len) != 0) {
+        LOG_WRN("RC decryption failed from 0x%04x", ctx->addr);
+        return -EBADMSG;
+    }
+
+    if (plain_len < sizeof(mesh_rc_vector_t)) {
+        return -EINVAL;
+    }
+
+    /* Parse vector */
+    int16_t x = (int16_t)(plaintext[0] | (plaintext[1] << 8));
+    int16_t y = (int16_t)(plaintext[2] | (plaintext[3] << 8));
+
+    /* Apply mixing and set PWM */
+    rc_apply_vector(x, y);
+
+    return 0;
+}
+
+/**
+ * Handle RC configuration command
+ * Format: [mode][invert_flags] (2 bytes)
+ */
+static int rc_config_handler(const struct bt_mesh_model *model,
+                             struct bt_mesh_msg_ctx *ctx,
+                             struct net_buf_simple *buf)
+{
+    if (buf->len < sizeof(mesh_rc_config_t)) {
+        LOG_WRN("RC config command too short from 0x%04x", ctx->addr);
+        return -EINVAL;
+    }
+
+    update_peer(ctx->addr, ctx->recv_rssi, 0);
+
+    /* Check PIN authentication */
+    if (pin_required && !mesh_hid_is_peer_authenticated(ctx->addr)) {
+        LOG_WRN("RC config rejected - peer 0x%04x not authenticated", ctx->addr);
+        return -EACCES;
+    }
+
+    uint8_t mode = net_buf_simple_pull_u8(buf);
+    uint8_t invert = net_buf_simple_pull_u8(buf);
+
+    /* Validate mode */
+    if (mode > MESH_RC_MODE_SKID_STEER) {
+        LOG_WRN("Invalid RC mode %d from 0x%04x", mode, ctx->addr);
+        return -EINVAL;
+    }
+
+    rc_drive_mode = mode;
+    rc_invert_flags = invert;
+
+    LOG_INF("RC config from 0x%04x: mode=%s invert=0x%02x",
+            ctx->addr,
+            mode == MESH_RC_MODE_SKID_STEER ? "skid_steer" : "normal",
+            invert);
+
+    char event_data[128];
+    snprintf(event_data, sizeof(event_data),
+        "\"from\":\"0x%04x\",\"mode\":\"%s\",\"invert_ch0\":%s,\"invert_ch1\":%s,\"swap\":%s",
+        ctx->addr,
+        mode == MESH_RC_MODE_SKID_STEER ? "skid_steer" : "normal",
+        (invert & MESH_RC_INVERT_CH0) ? "true" : "false",
+        (invert & MESH_RC_INVERT_CH1) ? "true" : "false",
+        (invert & MESH_RC_SWAP_CHANNELS) ? "true" : "false");
+    jsonl_serial_send_event("rc_config", event_data);
+
+    return 0;
+}
+
+/* ========== RC SEND FUNCTIONS ========== */
+
+/**
+ * Send RC vector command (plaintext)
+ */
+int mesh_hid_send_rc_vector(uint16_t dst_addr, int16_t x, int16_t y)
+{
+    if (!bt_mesh_is_provisioned()) {
+        return -ENOENT;
+    }
+
+    struct bt_mesh_msg_ctx ctx = {
+        .net_idx = 0,
+        .app_idx = 0,
+        .addr = dst_addr,
+        .send_ttl = MESH_TTL_DEFAULT,
+    };
+
+    NET_BUF_SIMPLE_DEFINE(msg, 16);
+    bt_mesh_model_msg_init(&msg, MESH_HID_OP_RC_VECTOR);
+    net_buf_simple_add_le16(&msg, (uint16_t)x);
+    net_buf_simple_add_le16(&msg, (uint16_t)y);
+    net_buf_simple_add_u8(&msg, 0);  /* flags reserved */
+
+    return bt_mesh_model_send(&vendor_models[0], &ctx, &msg, NULL, NULL);
+}
+
+/**
+ * Send encrypted RC vector command
+ */
+int mesh_hid_send_rc_vector_encrypted(uint16_t dst_addr, int16_t x, int16_t y)
+{
+    if (!bt_mesh_is_provisioned()) {
+        return -ENOENT;
+    }
+
+    mesh_peer_t *peer = get_peer_ptr(dst_addr);
+    if (!peer || !peer->has_session_key) {
+        return -ENOENT;
+    }
+
+    /* Build plaintext */
+    uint8_t plaintext[5];
+    plaintext[0] = (uint8_t)(x & 0xFF);
+    plaintext[1] = (uint8_t)((x >> 8) & 0xFF);
+    plaintext[2] = (uint8_t)(y & 0xFF);
+    plaintext[3] = (uint8_t)((y >> 8) & 0xFF);
+    plaintext[4] = 0;  /* flags */
+
+    uint8_t ciphertext[32];
+    size_t cipher_len;
+    if (encrypt_message(peer, plaintext, sizeof(plaintext), ciphertext, &cipher_len) != 0) {
+        return -EIO;
+    }
+
+    struct bt_mesh_msg_ctx ctx = {
+        .net_idx = 0,
+        .app_idx = 0,
+        .addr = dst_addr,
+        .send_ttl = MESH_TTL_DEFAULT,
+    };
+
+    NET_BUF_SIMPLE_DEFINE(msg, 48);
+    bt_mesh_model_msg_init(&msg, MESH_HID_OP_RC_VECTOR_ENC);
+    net_buf_simple_add_mem(&msg, ciphertext, cipher_len);
+
+    return bt_mesh_model_send(&vendor_models[0], &ctx, &msg, NULL, NULL);
+}
+
+/**
+ * Send RC configuration command
+ */
+int mesh_hid_send_rc_config(uint16_t dst_addr, uint8_t mode, uint8_t invert)
+{
+    if (!bt_mesh_is_provisioned()) {
+        return -ENOENT;
+    }
+
+    struct bt_mesh_msg_ctx ctx = {
+        .net_idx = 0,
+        .app_idx = 0,
+        .addr = dst_addr,
+        .send_ttl = MESH_TTL_DEFAULT,
+    };
+
+    NET_BUF_SIMPLE_DEFINE(msg, 12);
+    bt_mesh_model_msg_init(&msg, MESH_HID_OP_RC_CONFIG);
+    net_buf_simple_add_u8(&msg, mode);
+    net_buf_simple_add_u8(&msg, invert);
+
+    return bt_mesh_model_send(&vendor_models[0], &ctx, &msg, NULL, NULL);
+}
+
+/* ========== RC CONFIG GETTERS/SETTERS ========== */
+
+void mesh_hid_set_rc_mode(uint8_t mode)
+{
+    if (mode <= MESH_RC_MODE_SKID_STEER) {
+        rc_drive_mode = mode;
+        LOG_INF("RC mode set to %s",
+                mode == MESH_RC_MODE_SKID_STEER ? "skid_steer" : "normal");
+    }
+}
+
+uint8_t mesh_hid_get_rc_mode(void)
+{
+    return rc_drive_mode;
+}
+
+void mesh_hid_set_rc_invert(uint8_t invert)
+{
+    rc_invert_flags = invert;
+    LOG_INF("RC invert flags set to 0x%02x", invert);
+}
+
+uint8_t mesh_hid_get_rc_invert(void)
+{
+    return rc_invert_flags;
 }
 
 /**
