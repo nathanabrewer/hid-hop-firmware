@@ -685,6 +685,15 @@ void mesh_hid_set_rc_invert(uint8_t invert);
 uint8_t mesh_hid_get_rc_invert(void);
 
 /**
+ * Apply RC vector mixing and set PWM outputs
+ * Uses current drive mode (normal/skid-steer) and inversion settings.
+ *
+ * @param x  X axis value (-1000 to +1000)
+ * @param y  Y axis value (-1000 to +1000)
+ */
+void mesh_hid_apply_rc_vector(int16_t x, int16_t y);
+
+/**
  * Set periodic discovery interval
  *
  * @param interval_ms  Interval in milliseconds (0 to disable)

@@ -2914,6 +2914,11 @@ uint8_t mesh_hid_get_rc_invert(void)
     return rc_invert_flags;
 }
 
+void mesh_hid_apply_rc_vector(int16_t x, int16_t y)
+{
+    rc_apply_vector(x, y);
+}
+
 /**
  * Set periodic discovery interval
  */

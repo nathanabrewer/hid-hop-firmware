@@ -76,6 +76,40 @@ static const struct gpio_dt_spec btn3 = GPIO_DT_SPEC_GET(DT_ALIAS(sw3), gpios);
 #define HAS_BTN3 0
 #endif
 
+/* Relay GPIO specs from devicetree aliases */
+#if GPIO_RELAY_COUNT > 0
+
+#if DT_NODE_EXISTS(DT_ALIAS(relay0))
+static const struct gpio_dt_spec relay0 = GPIO_DT_SPEC_GET(DT_ALIAS(relay0), gpios);
+#define HAS_RELAY0 1
+#else
+#define HAS_RELAY0 0
+#endif
+
+#if DT_NODE_EXISTS(DT_ALIAS(relay1))
+static const struct gpio_dt_spec relay1 = GPIO_DT_SPEC_GET(DT_ALIAS(relay1), gpios);
+#define HAS_RELAY1 1
+#else
+#define HAS_RELAY1 0
+#endif
+
+static uint8_t relay_state = 0;
+
+static const struct gpio_dt_spec *get_relay_spec(uint8_t index)
+{
+    switch (index) {
+#if HAS_RELAY0
+    case 0: return &relay0;
+#endif
+#if HAS_RELAY1
+    case 1: return &relay1;
+#endif
+    default: return NULL;
+    }
+}
+
+#endif /* GPIO_RELAY_COUNT > 0 */
+
 /* RC PWM devices from devicetree (XIAO uses pwm1 for RC outputs) */
 #if GPIO_RC_COUNT > 0 && defined(CONFIG_PWM)
 #if DT_NODE_HAS_STATUS(DT_NODELABEL(pwm1), okay)
@@ -185,6 +219,23 @@ bool gpio_control_init(void)
             }
         }
     }
+
+    /* Configure relays */
+#if GPIO_RELAY_COUNT > 0
+    for (int i = 0; i < GPIO_RELAY_COUNT; i++) {
+        const struct gpio_dt_spec *rly = get_relay_spec(i);
+        if (rly && device_is_ready(rly->port)) {
+            ret = gpio_pin_configure_dt(rly, GPIO_OUTPUT_INACTIVE);
+            if (ret < 0) {
+                LOG_ERR("Failed to configure relay%d: %d", i, ret);
+            } else {
+                LOG_INF("Relay%d configured on P%d.%d", i,
+                        rly->port == DEVICE_DT_GET(DT_NODELABEL(gpio0)) ? 0 : 1,
+                        rly->pin);
+            }
+        }
+    }
+#endif
 
     /* Initialize RC PWM channels */
 #if GPIO_RC_COUNT > 0 && defined(CONFIG_PWM) && HAS_RC_PWM
@@ -344,6 +395,60 @@ void gpio_led_blink(uint8_t led_index, uint8_t count, uint16_t on_ms, uint16_t o
         }
     }
 }
+
+/*
+ * Relay functions - only compiled when GPIO_RELAY_COUNT > 0
+ */
+#if GPIO_RELAY_COUNT > 0
+
+bool gpio_relay_set(uint8_t index, bool on)
+{
+    if (!initialized || index >= GPIO_RELAY_COUNT) {
+        return false;
+    }
+
+    const struct gpio_dt_spec *rly = get_relay_spec(index);
+    if (!rly || !device_is_ready(rly->port)) {
+        return false;
+    }
+
+    int ret = gpio_pin_set_dt(rly, on ? 1 : 0);
+    if (ret < 0) {
+        LOG_ERR("Failed to set relay%d: %d", index, ret);
+        return false;
+    }
+
+    if (on) {
+        relay_state |= (1 << index);
+    } else {
+        relay_state &= ~(1 << index);
+    }
+
+    LOG_INF("Relay%d: %s", index, on ? "ON" : "OFF");
+    return true;
+}
+
+bool gpio_relay_get(uint8_t index)
+{
+    if (index >= GPIO_RELAY_COUNT) {
+        return false;
+    }
+    return (relay_state & (1 << index)) != 0;
+}
+
+void gpio_relay_set_all(uint8_t state)
+{
+    for (int i = 0; i < GPIO_RELAY_COUNT; i++) {
+        gpio_relay_set(i, (state & (1 << i)) != 0);
+    }
+}
+
+uint8_t gpio_relay_get_all(void)
+{
+    return relay_state;
+}
+
+#endif /* GPIO_RELAY_COUNT > 0 */
 
 /*
  * RC PWM functions - only compiled when GPIO_RC_COUNT > 0

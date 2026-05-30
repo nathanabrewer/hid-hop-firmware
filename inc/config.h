@@ -85,4 +85,17 @@ bool config_is_locked_out(void);
  */
 void config_reset_defaults(void);
 
+/**
+ * Get mouse-to-RC routing enabled state
+ * @return true if mouse commands should route to RC PWM outputs
+ */
+bool config_get_mouse_to_rc(void);
+
+/**
+ * Set mouse-to-RC routing enabled state
+ * @param enabled true to enable, false to disable
+ * @return true on success
+ */
+bool config_set_mouse_to_rc(bool enabled);
+
 #endif /* CONFIG_H */

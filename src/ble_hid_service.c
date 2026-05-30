@@ -15,6 +15,8 @@
 
 #include "ble_hid_service.h"
 #include "config.h"
+#include "hid_keyboard.h"
+#include "security.h"
 
 LOG_MODULE_REGISTER(ble_hid_service, LOG_LEVEL_INF);
 
@@ -31,10 +33,16 @@ static struct bt_uuid_128 cmd_char_uuid = BT_UUID_INIT_128(
 static struct bt_uuid_128 resp_char_uuid = BT_UUID_INIT_128(
     BT_UUID_128_ENCODE(0xf8b34002, 0x6e8b, 0x4b5a, 0x9f3e, 0x2c1d4a8e7f00));
 
+/* Keyboard LED state characteristic - notifications for NumLock/CapsLock/ScrollLock */
+static struct bt_uuid_128 kbd_leds_char_uuid = BT_UUID_INIT_128(
+    BT_UUID_128_ENCODE(0xf8b34003, 0x6e8b, 0x4b5a, 0x9f3e, 0x2c1d4a8e7f00));
+
 /* State */
 static ble_hid_cmd_callback_t cmd_callback = NULL;
 static struct bt_conn *current_conn = NULL;
 static bool resp_notifications_enabled = false;
+static bool kbd_leds_notifications_enabled = false;
+static uint8_t last_kbd_led_state = 0xFF;  /* Invalid initial value to force first notification */
 static bool initialized = false;
 
 /*
@@ -50,6 +58,10 @@ static ssize_t cmd_write_handler(struct bt_conn *conn,
                                   const void *buf, uint16_t len,
                                   uint16_t offset, uint8_t flags);
 static void resp_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value);
+static void kbd_leds_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value);
+static ssize_t kbd_leds_read_handler(struct bt_conn *conn,
+                                      const struct bt_gatt_attr *attr,
+                                      void *buf, uint16_t len, uint16_t offset);
 
 /* GATT Service Definition */
 BT_GATT_SERVICE_DEFINE(hid_bridge_svc,
@@ -70,6 +82,14 @@ BT_GATT_SERVICE_DEFINE(hid_bridge_svc,
                            BT_GATT_PERM_NONE,
                            NULL, NULL, NULL),
     BT_GATT_CCC(resp_ccc_changed,
+                BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
+
+    /* Keyboard LED State Characteristic - Read + Notify for NumLock/CapsLock/ScrollLock */
+    BT_GATT_CHARACTERISTIC(&kbd_leds_char_uuid.uuid,
+                           BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY,
+                           BT_GATT_PERM_READ,
+                           kbd_leds_read_handler, NULL, NULL),
+    BT_GATT_CCC(kbd_leds_ccc_changed,
                 BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
 );
 
@@ -112,6 +132,62 @@ static void resp_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
     resp_notifications_enabled = (value == BT_GATT_CCC_NOTIFY);
     LOG_INF("Response notifications %s",
             resp_notifications_enabled ? "enabled" : "disabled");
+}
+
+/**
+ * Handle reads of keyboard LED state characteristic
+ */
+static ssize_t kbd_leds_read_handler(struct bt_conn *conn,
+                                      const struct bt_gatt_attr *attr,
+                                      void *buf, uint16_t len, uint16_t offset)
+{
+    ARG_UNUSED(conn);
+    ARG_UNUSED(attr);
+
+    uint8_t led_state = hid_keyboard_get_led_state();
+    return bt_gatt_attr_read(conn, attr, buf, len, offset, &led_state, sizeof(led_state));
+}
+
+/**
+ * Handle CCC changes for keyboard LED state characteristic
+ */
+static void kbd_leds_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
+{
+    ARG_UNUSED(attr);
+
+    kbd_leds_notifications_enabled = (value == BT_GATT_CCC_NOTIFY);
+    LOG_INF("Keyboard LED notifications %s",
+            kbd_leds_notifications_enabled ? "enabled" : "disabled");
+
+    /* Send initial state when notifications are enabled */
+    if (kbd_leds_notifications_enabled && current_conn != NULL) {
+        uint8_t led_state = hid_keyboard_get_led_state();
+        last_kbd_led_state = led_state;
+
+        /*
+         * GATT attribute layout for kbd_leds characteristic:
+         * [0] Primary Service declaration
+         * [1] Command characteristic declaration
+         * [2] Command characteristic value
+         * [3] Response characteristic declaration
+         * [4] Response characteristic value
+         * [5] Response CCC descriptor
+         * [6] Keyboard LED characteristic declaration
+         * [7] Keyboard LED characteristic value  <-- This is what we need
+         * [8] Keyboard LED CCC descriptor
+         */
+        const struct bt_gatt_attr *led_attr = &hid_bridge_svc.attrs[7];
+
+        int err = bt_gatt_notify(current_conn, led_attr, &led_state, sizeof(led_state));
+        if (err) {
+            LOG_ERR("Failed to send initial LED state (err %d)", err);
+        } else {
+            LOG_INF("Sent initial LED state: Num=%d Caps=%d Scroll=%d",
+                    (led_state >> 0) & 0x01,
+                    (led_state >> 1) & 0x01,
+                    (led_state >> 2) & 0x01);
+        }
+    }
 }
 
 /**
@@ -166,6 +242,10 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason)
     }
 
     resp_notifications_enabled = false;
+    kbd_leds_notifications_enabled = false;
+
+    /* End security session on disconnect - requires re-auth on reconnect */
+    security_end_session();
 
     /* Restart advertising with current name in AD and scan response */
     start_advertising_with_name();
@@ -487,5 +567,42 @@ bool ble_hid_service_send_jsonl(const char *json_line, size_t len)
     }
 
     LOG_DBG("JSONL sent to phone: %zu bytes", len);
+    return true;
+}
+
+/**
+ * Check and notify keyboard LED state changes
+ * Call this periodically from main loop to send notifications on state change
+ * Returns true if a notification was sent
+ */
+bool ble_hid_service_check_kbd_leds(void)
+{
+    if (!initialized || current_conn == NULL || !kbd_leds_notifications_enabled) {
+        return false;
+    }
+
+    uint8_t current_state = hid_keyboard_get_led_state();
+
+    /* Only notify if state changed */
+    if (current_state == last_kbd_led_state) {
+        return false;
+    }
+
+    last_kbd_led_state = current_state;
+
+    /* Send notification */
+    const struct bt_gatt_attr *led_attr = &hid_bridge_svc.attrs[7];
+
+    int err = bt_gatt_notify(current_conn, led_attr, &current_state, sizeof(current_state));
+    if (err) {
+        LOG_ERR("Failed to notify LED state change (err %d)", err);
+        return false;
+    }
+
+    LOG_INF("LED state changed: Num=%d Caps=%d Scroll=%d",
+            (current_state >> 0) & 0x01,
+            (current_state >> 1) & 0x01,
+            (current_state >> 2) & 0x01);
+
     return true;
 }

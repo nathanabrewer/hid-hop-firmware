@@ -21,6 +21,10 @@
 #define BLE_HID_RESP_CHAR_UUID \
     BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0xf8b34002, 0x6e8b, 0x4b5a, 0x9f3e, 0x2c1d4a8e7f00))
 
+/* Keyboard LED state characteristic - read/notify for NumLock/CapsLock/ScrollLock */
+#define BLE_HID_KBD_LEDS_CHAR_UUID \
+    BT_UUID_DECLARE_128(BT_UUID_128_ENCODE(0xf8b34003, 0x6e8b, 0x4b5a, 0x9f3e, 0x2c1d4a8e7f00))
+
 /**
  * Callback type for received commands
  * @param data Command data
@@ -76,5 +80,13 @@ bool ble_hid_service_set_name(const char *name);
  * @return true on success
  */
 bool ble_hid_service_send_jsonl(const char *json_line, size_t len);
+
+/**
+ * Check and notify keyboard LED state changes
+ * Call this periodically from main loop to send notifications on state change.
+ * Sends notification when NumLock, CapsLock, or ScrollLock state changes.
+ * @return true if a notification was sent
+ */
+bool ble_hid_service_check_kbd_leds(void);
 
 #endif /* BLE_HID_SERVICE_H */

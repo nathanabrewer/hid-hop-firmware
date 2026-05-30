@@ -52,6 +52,7 @@ static struct {
     char pin[MAX_PIN_LENGTH + 1];
     uint8_t pin_length;
     uint8_t failed_attempts;
+    bool mouse_to_rc;       /* Route mouse commands to RC PWM outputs */
     bool initialized;
 } config;
 
@@ -229,9 +230,10 @@ static bool read_config_from_flash(void)
     memcpy(config.pin, flash_data.pin, sizeof(config.pin));
     config.pin_length = flash_data.pin_length;
     config.failed_attempts = flash_data.failed_attempts;
+    config.mouse_to_rc = (flash_data._reserved[0] == 1);
 
-    LOG_INF("Config loaded from flash: name='%s', version=%d",
-            config.device_name, flash_data.version);
+    LOG_INF("Config loaded from flash: name='%s', version=%d, mouse_to_rc=%d",
+            config.device_name, flash_data.version, config.mouse_to_rc);
     return true;
 }
 
@@ -254,6 +256,7 @@ static int write_config_to_flash(void)
     memcpy(flash_data.pin, config.pin, sizeof(flash_data.pin));
     flash_data.pin_length = config.pin_length;
     flash_data.failed_attempts = config.failed_attempts;
+    flash_data._reserved[0] = config.mouse_to_rc ? 1 : 0;
 
     /* Compute CRC of everything except the CRC field */
     size_t crc_data_len = offsetof(config_flash_t, crc32);
@@ -336,9 +339,11 @@ static void setup_defaults(void)
     config.pin_length = DEFAULT_PIN_LENGTH;
 
     config.failed_attempts = 0;
+    config.mouse_to_rc = true;
     config.initialized = true;
 
-    LOG_INF("Using defaults: name='%s', PIN=%d digits", config.device_name, config.pin_length);
+    LOG_INF("Using defaults: name='%s', PIN=%d digits, mouse_to_rc=ON",
+            config.device_name, config.pin_length);
 }
 
 /* Debug blink helper for config init diagnosis */
@@ -400,12 +405,12 @@ bool config_init(void)
         cfg_dbg_blink(4);  /* 4 blinks = config was valid */
         LOG_INF("Config loaded successfully");
     } else {
-        /* Invalid or missing config - use defaults (no save yet - test boot first) */
+        /* Invalid or missing config - use defaults */
         LOG_WRN("Config invalid or missing - using defaults");
         cfg_dbg_blink(5);  /* 5 blinks = using defaults */
         setup_defaults();
 
-        /* Try to save - but don't fail boot if this fails */
+        /* Save defaults to flash */
         cfg_dbg_blink(6);  /* 6 blinks = about to save */
         int rc = write_config_to_flash();
         cfg_dbg_blink(7);  /* 7 blinks = save done */
@@ -678,4 +683,29 @@ void config_reset_defaults(void)
     write_config_to_flash();
 
     LOG_INF("Configuration reset to defaults, new name: %s", config.device_name);
+}
+
+/**
+ * Get mouse-to-RC routing state
+ */
+bool config_get_mouse_to_rc(void)
+{
+    return config.mouse_to_rc;
+}
+
+/**
+ * Set mouse-to-RC routing state
+ */
+bool config_set_mouse_to_rc(bool enabled)
+{
+    config.mouse_to_rc = enabled;
+
+    int rc = write_config_to_flash();
+    if (rc) {
+        LOG_ERR("Failed to save mouse_to_rc config: %d", rc);
+        return false;
+    }
+
+    LOG_INF("Mouse-to-RC routing: %s", enabled ? "enabled" : "disabled");
+    return true;
 }

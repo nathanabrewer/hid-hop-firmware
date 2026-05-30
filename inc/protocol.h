@@ -32,6 +32,7 @@ typedef enum {
     CMD_MOUSE_SCROLL        = 0x03,  /* Scroll wheel */
     CMD_MOUSE_DRAG_START    = 0x04,  /* Start drag operation */
     CMD_MOUSE_DRAG_END      = 0x05,  /* End drag operation */
+    CMD_JOYSTICK_XY         = 0x06,  /* Absolute joystick position */
 
     /* Keyboard commands: 0x20 - 0x3F */
     CMD_KEYBOARD_TYPE       = 0x20,  /* Type ASCII text */
@@ -69,6 +70,28 @@ typedef enum {
     CMD_GPIO_READ_AIN       = 0x85,  /* Read analog inputs */
     CMD_GPIO_GET_ALL        = 0x86,  /* Get all GPIO states */
     CMD_GPIO_STATE          = 0x87,  /* GPIO state response */
+
+    /* Keyboard LED state: 0xA0 - 0xAF */
+    CMD_GET_KBD_LEDS        = 0xA0,  /* Get keyboard LED state (NumLock, CapsLock, etc.) */
+    CMD_KBD_LEDS_STATE      = 0xA1,  /* Keyboard LED state response */
+
+    /* RC PWM/Joystick commands: 0xB0 - 0xBF */
+    CMD_RC_SET              = 0xB0,  /* Set RC channel pulse width */
+    CMD_RC_GET              = 0xB1,  /* Get RC channel pulse width */
+    CMD_RC_STATE            = 0xB2,  /* RC state response (single channel or all) */
+    CMD_RC_CENTER_ALL       = 0xB3,  /* Center all RC channels (1500us) */
+    CMD_RC_DISABLE          = 0xB4,  /* Disable RC channel (stop PWM) */
+    CMD_RC_SET_FAILSAFE     = 0xB5,  /* Enable/disable failsafe mode */
+    CMD_RC_GET_ALL          = 0xB6,  /* Get all RC channel states */
+    CMD_RC_SET_MOUSE_RC     = 0xB7,  /* Enable/disable mouse-to-RC routing */
+    CMD_RC_GET_MOUSE_RC     = 0xB8,  /* Query mouse-to-RC state */
+    CMD_RC_SET_INVERT       = 0xB9,  /* Set channel inversion flags */
+
+    /* Device mode commands: 0xC0 - 0xCF */
+    CMD_GET_MODE            = 0xC0,  /* Get current device mode */
+    CMD_SET_MODE            = 0xC1,  /* Set device mode (requires reboot) */
+    CMD_MODE_STATE          = 0xC2,  /* Device mode state response */
+    CMD_REBOOT              = 0xC3,  /* Reboot device */
 
     /* Status/Error: 0xE0 - 0xFF */
     CMD_STATUS              = 0xE0,  /* Status response */
@@ -171,6 +194,12 @@ typedef struct __attribute__((packed)) {
     uint8_t buttons;    /* Button mask (mouse_button_t flags) */
     uint8_t action;     /* 0 = release, 1 = press, 2 = click */
 } cmd_mouse_click_t;
+
+/* Joystick absolute position payload */
+typedef struct __attribute__((packed)) {
+    int16_t x;          /* X axis (-1000 to +1000, 0 = center) */
+    int16_t y;          /* Y axis (-1000 to +1000, 0 = center, positive = forward) */
+} cmd_joystick_xy_t;
 
 /* Mouse scroll command payload */
 typedef struct __attribute__((packed)) {
@@ -291,6 +320,85 @@ typedef struct __attribute__((packed)) {
     uint16_t ain1_value;    /* Analog input 1 value (12-bit, little-endian) */
 } cmd_gpio_state_t;
 
+/* Keyboard LED state response payload
+ * Reports NumLock, CapsLock, ScrollLock, etc. from host PC
+ */
+typedef struct __attribute__((packed)) {
+    uint8_t led_state;      /* Bitmask: 0=NumLock, 1=CapsLock, 2=ScrollLock, 3=Compose, 4=Kana */
+} cmd_kbd_leds_state_t;
+
+/* RC PWM/Joystick command payloads */
+
+/* RC set channel command payload */
+typedef struct __attribute__((packed)) {
+    uint8_t channel;        /* RC channel (0-based) */
+    uint16_t pulse_us;      /* Pulse width in microseconds (1000-2000, center=1500) */
+} cmd_rc_set_t;
+
+/* RC get channel command payload */
+typedef struct __attribute__((packed)) {
+    uint8_t channel;        /* RC channel to query (0-based) */
+} cmd_rc_get_t;
+
+/* RC single channel state response payload */
+typedef struct __attribute__((packed)) {
+    uint8_t channel;        /* RC channel (0-based) */
+    uint16_t pulse_us;      /* Current pulse width in microseconds */
+} cmd_rc_state_t;
+
+/* RC disable channel command payload */
+typedef struct __attribute__((packed)) {
+    uint8_t channel;        /* RC channel to disable (0-based) */
+} cmd_rc_disable_t;
+
+/* RC set failsafe command payload */
+typedef struct __attribute__((packed)) {
+    uint8_t enabled;        /* 1 = enable failsafe, 0 = disable */
+} cmd_rc_set_failsafe_t;
+
+/* RC mouse-to-RC routing command payload */
+typedef struct __attribute__((packed)) {
+    uint8_t enabled;        /* 1 = enable mouse-to-RC, 0 = disable */
+} cmd_rc_set_mouse_rc_t;
+
+/* RC mouse-to-RC state response payload */
+typedef struct __attribute__((packed)) {
+    uint8_t enabled;        /* 1 if mouse-to-RC is enabled */
+} cmd_rc_mouse_rc_state_t;
+
+/* RC channel inversion command payload */
+typedef struct __attribute__((packed)) {
+    uint8_t invert;         /* Bitmask: bit0=CH0, bit1=CH1, bit2=swap channels */
+} cmd_rc_set_invert_t;
+
+/* RC all channels state response payload (max 4 channels) */
+#define MAX_RC_CHANNELS 4
+typedef struct __attribute__((packed)) {
+    uint8_t channel_count;  /* Number of RC channels available */
+    uint8_t failsafe;       /* 1 if failsafe enabled, 0 otherwise */
+    uint16_t pulse_us[MAX_RC_CHANNELS];  /* Pulse widths for each channel */
+} cmd_rc_state_all_t;
+
+/* Device mode command payloads */
+
+/* Set device mode command payload */
+typedef struct __attribute__((packed)) {
+    uint8_t mode;           /* Device mode (0=HID, 1=MESH, 2=TUNNEL, 3=RC) */
+} cmd_set_mode_t;
+
+/* Device mode state response payload */
+#define MODE_NAME_MAX_LEN 12
+typedef struct __attribute__((packed)) {
+    uint8_t current_mode;   /* Current mode (0=HID, 1=MESH, 2=TUNNEL, 3=RC) */
+    uint8_t features;       /* Feature flags bitmask */
+    uint8_t name_len;       /* Length of mode name */
+    char name[MODE_NAME_MAX_LEN];  /* Mode name string (not null-terminated) */
+} cmd_mode_state_t;
+
+/* Device mode values: see device_mode.h for device_mode_t enum
+ * 0 = HID, 1 = MESH, 2 = TUNNEL, 3 = RC
+ */
+
 /* ==========================================
  * Protocol Functions
  * ==========================================
@@ -350,5 +458,41 @@ size_t protocol_build_name_response(uint8_t *buffer);
  * @return Length of response
  */
 size_t protocol_build_gpio_state(uint8_t *buffer);
+
+/**
+ * Build a keyboard LED state response
+ * @param buffer Output buffer
+ * @return Length of response
+ */
+size_t protocol_build_kbd_leds_state(uint8_t *buffer);
+
+/**
+ * Build an RC single channel state response
+ * @param buffer Output buffer
+ * @param channel RC channel number
+ * @return Length of response
+ */
+size_t protocol_build_rc_state(uint8_t *buffer, uint8_t channel);
+
+/**
+ * Build an RC all channels state response
+ * @param buffer Output buffer
+ * @return Length of response
+ */
+size_t protocol_build_rc_state_all(uint8_t *buffer);
+
+/**
+ * Build an RC mouse-to-RC state response
+ * @param buffer Output buffer
+ * @return Length of response
+ */
+size_t protocol_build_mouse_rc_state(uint8_t *buffer);
+
+/**
+ * Build a device mode state response
+ * @param buffer Output buffer
+ * @return Length of response
+ */
+size_t protocol_build_mode_state(uint8_t *buffer);
 
 #endif /* PROTOCOL_H */

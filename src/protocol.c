@@ -15,6 +15,8 @@
 #include "security.h"
 #include "config.h"
 #include "gpio_control.h"
+#include "device_mode.h"
+#include "mesh_hid.h"
 
 LOG_MODULE_REGISTER(protocol, LOG_LEVEL_DBG);
 
@@ -22,8 +24,48 @@ LOG_MODULE_REGISTER(protocol, LOG_LEVEL_DBG);
 extern uint32_t get_uptime_seconds(void);
 extern bool is_usb_ready(void);
 
+/* Mouse-to-RC virtual joystick accumulator */
+#define MOUSE_RC_SCALE       3     /* Multiply mouse deltas by this */
+#define MOUSE_RC_DECAY_MS    50    /* Decay interval */
+#define MOUSE_RC_DECAY_RATE  30    /* Units to decay per interval toward center */
+
+static int32_t mouse_rc_x = 0;
+static int32_t mouse_rc_y = 0;
+static int64_t mouse_rc_last_input = 0;
+
+/**
+ * Decay the virtual joystick toward center based on elapsed time
+ */
+static void mouse_rc_decay(void)
+{
+    int64_t now = k_uptime_get();
+    int64_t elapsed = now - mouse_rc_last_input;
+
+    if (elapsed < MOUSE_RC_DECAY_MS) {
+        return;
+    }
+
+    /* How many decay steps have passed */
+    int steps = (int)(elapsed / MOUSE_RC_DECAY_MS);
+    int decay = steps * MOUSE_RC_DECAY_RATE;
+
+    if (mouse_rc_x > 0) {
+        mouse_rc_x = (mouse_rc_x > decay) ? mouse_rc_x - decay : 0;
+    } else if (mouse_rc_x < 0) {
+        mouse_rc_x = (mouse_rc_x < -decay) ? mouse_rc_x + decay : 0;
+    }
+
+    if (mouse_rc_y > 0) {
+        mouse_rc_y = (mouse_rc_y > decay) ? mouse_rc_y - decay : 0;
+    } else if (mouse_rc_y < 0) {
+        mouse_rc_y = (mouse_rc_y < -decay) ? mouse_rc_y + decay : 0;
+    }
+}
+
 /**
  * Handle mouse move command
+ * When mouse-to-RC is enabled, accumulates dx/dy into a virtual joystick
+ * that decays back to center when input stops.
  */
 static status_code_t handle_mouse_move(const uint8_t *data, size_t length)
 {
@@ -35,6 +77,37 @@ static status_code_t handle_mouse_move(const uint8_t *data, size_t length)
 
     LOG_DBG("Mouse move: dx=%d, dy=%d", cmd->dx, cmd->dy);
 
+    /* Route to RC PWM if mouse-to-RC is enabled and RC channels exist */
+    if (config_get_mouse_to_rc() && GPIO_RC_COUNT > 0) {
+        /* Decay toward center based on time since last input */
+        mouse_rc_decay();
+
+        /* Accumulate scaled deltas */
+        mouse_rc_x += (int32_t)cmd->dx * MOUSE_RC_SCALE;
+        mouse_rc_y += (int32_t)cmd->dy * MOUSE_RC_SCALE;
+
+        /* Clamp to RC vector range */
+        if (mouse_rc_x < MESH_RC_VECTOR_MIN) mouse_rc_x = MESH_RC_VECTOR_MIN;
+        if (mouse_rc_x > MESH_RC_VECTOR_MAX) mouse_rc_x = MESH_RC_VECTOR_MAX;
+        if (mouse_rc_y < MESH_RC_VECTOR_MIN) mouse_rc_y = MESH_RC_VECTOR_MIN;
+        if (mouse_rc_y > MESH_RC_VECTOR_MAX) mouse_rc_y = MESH_RC_VECTOR_MAX;
+
+        mouse_rc_last_input = k_uptime_get();
+
+        /* Rotate 45° CW so "up" on screen = forward
+         * x' = 0.707*(x - y),  y' = 0.707*(x + y)
+         * Use fixed-point: 707/1000 ≈ 0.707 */
+        int32_t rx = (707 * (mouse_rc_x + mouse_rc_y)) / 1000;
+        int32_t ry = (707 * (-mouse_rc_x + mouse_rc_y)) / 1000;
+        if (rx < MESH_RC_VECTOR_MIN) rx = MESH_RC_VECTOR_MIN;
+        if (rx > MESH_RC_VECTOR_MAX) rx = MESH_RC_VECTOR_MAX;
+        if (ry < MESH_RC_VECTOR_MIN) ry = MESH_RC_VECTOR_MIN;
+        if (ry > MESH_RC_VECTOR_MAX) ry = MESH_RC_VECTOR_MAX;
+
+        mesh_hid_apply_rc_vector((int16_t)rx, (int16_t)ry);
+        return STATUS_OK;
+    }
+
     if (!is_usb_ready()) {
         return STATUS_ERR_USB_BUSY;
     }
@@ -43,6 +116,37 @@ static status_code_t handle_mouse_move(const uint8_t *data, size_t length)
         return STATUS_ERR_USB_FAILED;
     }
 
+    return STATUS_OK;
+}
+
+/**
+ * Handle absolute joystick position command
+ * Direct mapping to RC PWM — no accumulation, no decay.
+ */
+static status_code_t handle_joystick_xy(const uint8_t *data, size_t length)
+{
+    if (length < sizeof(cmd_joystick_xy_t)) {
+        return STATUS_ERR_INVALID_LEN;
+    }
+
+    const cmd_joystick_xy_t *cmd = (const cmd_joystick_xy_t *)data;
+
+    LOG_DBG("Joystick: x=%d, y=%d", cmd->x, cmd->y);
+
+    if (GPIO_RC_COUNT == 0) {
+        return STATUS_ERR_INVALID_DATA;
+    }
+
+    /* Rotate 45° CCW so controls feel natural
+     * x' = 0.707*(x + y),  y' = 0.707*(-x + y) */
+    int32_t rx = (707 * ((int32_t)cmd->x + (int32_t)cmd->y)) / 1000;
+    int32_t ry = (707 * (-(int32_t)cmd->x + (int32_t)cmd->y)) / 1000;
+    if (rx < MESH_RC_VECTOR_MIN) rx = MESH_RC_VECTOR_MIN;
+    if (rx > MESH_RC_VECTOR_MAX) rx = MESH_RC_VECTOR_MAX;
+    if (ry < MESH_RC_VECTOR_MIN) ry = MESH_RC_VECTOR_MIN;
+    if (ry > MESH_RC_VECTOR_MAX) ry = MESH_RC_VECTOR_MAX;
+
+    mesh_hid_apply_rc_vector((int16_t)rx, (int16_t)ry);
     return STATUS_OK;
 }
 
@@ -386,6 +490,147 @@ static status_code_t handle_gpio_set_relay(const uint8_t *data, size_t length)
 }
 
 /**
+ * Handle RC set command - set PWM pulse width for RC channel
+ */
+static status_code_t handle_rc_set(const uint8_t *data, size_t length)
+{
+    if (length < sizeof(cmd_rc_set_t)) {
+        return STATUS_ERR_INVALID_LEN;
+    }
+
+    const cmd_rc_set_t *cmd = (const cmd_rc_set_t *)data;
+
+    /* Validate pulse width range */
+    if (cmd->pulse_us < RC_PWM_MIN_US || cmd->pulse_us > RC_PWM_MAX_US) {
+        LOG_WRN("RC pulse out of range: %u (valid: %u-%u)",
+                cmd->pulse_us, RC_PWM_MIN_US, RC_PWM_MAX_US);
+        return STATUS_ERR_INVALID_DATA;
+    }
+
+    if (!gpio_rc_set(cmd->channel, cmd->pulse_us)) {
+        LOG_WRN("RC set failed: channel=%u, pulse=%u", cmd->channel, cmd->pulse_us);
+        return STATUS_ERR_INVALID_DATA;
+    }
+
+    LOG_DBG("RC set: ch=%u, pulse=%uus", cmd->channel, cmd->pulse_us);
+    return STATUS_OK;
+}
+
+/**
+ * Handle RC disable command - stop PWM output on channel
+ */
+static status_code_t handle_rc_disable(const uint8_t *data, size_t length)
+{
+    if (length < sizeof(cmd_rc_disable_t)) {
+        return STATUS_ERR_INVALID_LEN;
+    }
+
+    const cmd_rc_disable_t *cmd = (const cmd_rc_disable_t *)data;
+
+    if (!gpio_rc_disable(cmd->channel)) {
+        LOG_WRN("RC disable failed: channel=%u", cmd->channel);
+        return STATUS_ERR_INVALID_DATA;
+    }
+
+    LOG_INF("RC disabled: ch=%u", cmd->channel);
+    return STATUS_OK;
+}
+
+/**
+ * Handle RC center all command
+ */
+static status_code_t handle_rc_center_all(void)
+{
+    gpio_rc_center_all();
+    LOG_INF("RC all channels centered");
+    return STATUS_OK;
+}
+
+/**
+ * Handle RC set failsafe command
+ */
+static status_code_t handle_rc_set_failsafe(const uint8_t *data, size_t length)
+{
+    if (length < sizeof(cmd_rc_set_failsafe_t)) {
+        return STATUS_ERR_INVALID_LEN;
+    }
+
+    const cmd_rc_set_failsafe_t *cmd = (const cmd_rc_set_failsafe_t *)data;
+
+    gpio_rc_set_failsafe(cmd->enabled != 0);
+    LOG_INF("RC failsafe: %s", cmd->enabled ? "enabled" : "disabled");
+    return STATUS_OK;
+}
+
+/**
+ * Handle RC set mouse-to-RC routing command
+ */
+static status_code_t handle_rc_set_mouse_rc(const uint8_t *data, size_t length)
+{
+    if (length < sizeof(cmd_rc_set_mouse_rc_t)) {
+        return STATUS_ERR_INVALID_LEN;
+    }
+
+    const cmd_rc_set_mouse_rc_t *cmd = (const cmd_rc_set_mouse_rc_t *)data;
+
+    if (!config_set_mouse_to_rc(cmd->enabled != 0)) {
+        return STATUS_ERR_INVALID_DATA;
+    }
+
+    LOG_INF("Mouse-to-RC: %s", cmd->enabled ? "enabled" : "disabled");
+    return STATUS_OK;
+}
+
+/**
+ * Handle RC set channel inversion command
+ */
+static status_code_t handle_rc_set_invert(const uint8_t *data, size_t length)
+{
+    if (length < sizeof(cmd_rc_set_invert_t)) {
+        return STATUS_ERR_INVALID_LEN;
+    }
+
+    const cmd_rc_set_invert_t *cmd = (const cmd_rc_set_invert_t *)data;
+    mesh_hid_set_rc_invert(cmd->invert);
+
+    LOG_INF("RC invert set: 0x%02x (ch0=%d ch1=%d swap=%d)",
+            cmd->invert,
+            (cmd->invert & 0x01) ? 1 : 0,
+            (cmd->invert & 0x02) ? 1 : 0,
+            (cmd->invert & 0x04) ? 1 : 0);
+    return STATUS_OK;
+}
+
+/**
+ * Handle set device mode command
+ * Note: Mode change requires reboot to take effect
+ */
+static status_code_t handle_set_mode(const uint8_t *data, size_t length)
+{
+    if (length < sizeof(cmd_set_mode_t)) {
+        return STATUS_ERR_INVALID_LEN;
+    }
+
+    const cmd_set_mode_t *cmd = (const cmd_set_mode_t *)data;
+
+    /* Validate mode value */
+    if (cmd->mode >= DEVICE_MODE_COUNT) {
+        LOG_WRN("Invalid mode: %u (max=%u)", cmd->mode, DEVICE_MODE_COUNT - 1);
+        return STATUS_ERR_INVALID_DATA;
+    }
+
+    int err = device_mode_set((device_mode_t)cmd->mode);
+    if (err) {
+        LOG_ERR("Failed to set mode: %d", err);
+        return STATUS_ERR_INVALID_DATA;
+    }
+
+    LOG_INF("Device mode set to %u (%s) - reboot required",
+            cmd->mode, device_mode_name((device_mode_t)cmd->mode));
+    return STATUS_OK;
+}
+
+/**
  * Handle set PIN command
  */
 static status_code_t handle_set_pin(const uint8_t *data, size_t length)
@@ -456,6 +701,8 @@ status_code_t protocol_process_command(const uint8_t *data, size_t length)
         return handle_mouse_drag_start();
     case CMD_MOUSE_DRAG_END:
         return handle_mouse_drag_end();
+    case CMD_JOYSTICK_XY:
+        return handle_joystick_xy(payload, payload_len);
 
     /* Keyboard commands */
     case CMD_KEYBOARD_TYPE:
@@ -506,6 +753,41 @@ status_code_t protocol_process_command(const uint8_t *data, size_t length)
     case CMD_GPIO_GET_ALL:
         /* GPIO state response is built separately in main.c */
         return STATUS_OK;
+
+    /* Keyboard LED state */
+    case CMD_GET_KBD_LEDS:
+        /* Response is built separately in main.c */
+        return STATUS_OK;
+
+    /* RC PWM/Joystick commands */
+    case CMD_RC_SET:
+        return handle_rc_set(payload, payload_len);
+    case CMD_RC_GET:
+        /* Response is built separately in main.c */
+        return STATUS_OK;
+    case CMD_RC_CENTER_ALL:
+        return handle_rc_center_all();
+    case CMD_RC_DISABLE:
+        return handle_rc_disable(payload, payload_len);
+    case CMD_RC_SET_FAILSAFE:
+        return handle_rc_set_failsafe(payload, payload_len);
+    case CMD_RC_GET_ALL:
+        /* Response is built separately in main.c */
+        return STATUS_OK;
+    case CMD_RC_SET_MOUSE_RC:
+        return handle_rc_set_mouse_rc(payload, payload_len);
+    case CMD_RC_SET_INVERT:
+        return handle_rc_set_invert(payload, payload_len);
+    case CMD_RC_GET_MOUSE_RC:
+        /* Response is built separately in main.c */
+        return STATUS_OK;
+
+    /* Device mode commands */
+    case CMD_GET_MODE:
+        /* Response is built separately in main.c */
+        return STATUS_OK;
+    case CMD_SET_MODE:
+        return handle_set_mode(payload, payload_len);
 
     default:
         LOG_WRN("Unknown command: 0x%02X", header->type);
@@ -607,4 +889,121 @@ size_t protocol_build_gpio_state(uint8_t *buffer)
             state->ain0_value, state->ain1_value);
 
     return sizeof(cmd_header_t) + sizeof(cmd_gpio_state_t);
+}
+
+/**
+ * Build keyboard LED state response
+ * Reports NumLock, CapsLock, ScrollLock state from host PC
+ */
+size_t protocol_build_kbd_leds_state(uint8_t *buffer)
+{
+    cmd_header_t *header = (cmd_header_t *)buffer;
+    cmd_kbd_leds_state_t *state = (cmd_kbd_leds_state_t *)(buffer + sizeof(cmd_header_t));
+
+    header->type = CMD_KBD_LEDS_STATE;
+    header->length = sizeof(cmd_kbd_leds_state_t);
+
+    state->led_state = hid_keyboard_get_led_state();
+
+    LOG_DBG("Keyboard LEDs: Num=%d Caps=%d Scroll=%d",
+            (state->led_state >> 0) & 1,
+            (state->led_state >> 1) & 1,
+            (state->led_state >> 2) & 1);
+
+    return sizeof(cmd_header_t) + sizeof(cmd_kbd_leds_state_t);
+}
+
+/**
+ * Build RC single channel state response
+ */
+size_t protocol_build_rc_state(uint8_t *buffer, uint8_t channel)
+{
+    cmd_header_t *header = (cmd_header_t *)buffer;
+    cmd_rc_state_t *state = (cmd_rc_state_t *)(buffer + sizeof(cmd_header_t));
+
+    header->type = CMD_RC_STATE;
+    header->length = sizeof(cmd_rc_state_t);
+
+    state->channel = channel;
+    state->pulse_us = gpio_rc_get(channel);
+
+    LOG_DBG("RC state: ch=%u, pulse=%uus", channel, state->pulse_us);
+
+    return sizeof(cmd_header_t) + sizeof(cmd_rc_state_t);
+}
+
+/**
+ * Build RC all channels state response
+ */
+size_t protocol_build_rc_state_all(uint8_t *buffer)
+{
+    cmd_header_t *header = (cmd_header_t *)buffer;
+    cmd_rc_state_all_t *state = (cmd_rc_state_all_t *)(buffer + sizeof(cmd_header_t));
+
+    header->type = CMD_RC_STATE;
+    header->length = sizeof(cmd_rc_state_all_t);
+
+    state->channel_count = GPIO_RC_COUNT;
+    state->failsafe = gpio_rc_failsafe_enabled() ? 1 : 0;
+
+    for (uint8_t i = 0; i < MAX_RC_CHANNELS; i++) {
+        if (i < GPIO_RC_COUNT) {
+            state->pulse_us[i] = gpio_rc_get(i);
+        } else {
+            state->pulse_us[i] = 0;
+        }
+    }
+
+    LOG_DBG("RC state all: count=%u, failsafe=%u", state->channel_count, state->failsafe);
+
+    return sizeof(cmd_header_t) + sizeof(cmd_rc_state_all_t);
+}
+
+/**
+ * Build mouse-to-RC state response
+ */
+size_t protocol_build_mouse_rc_state(uint8_t *buffer)
+{
+    cmd_header_t *header = (cmd_header_t *)buffer;
+    cmd_rc_mouse_rc_state_t *state = (cmd_rc_mouse_rc_state_t *)(buffer + sizeof(cmd_header_t));
+
+    header->type = CMD_RC_GET_MOUSE_RC;
+    header->length = sizeof(cmd_rc_mouse_rc_state_t);
+
+    state->enabled = config_get_mouse_to_rc() ? 1 : 0;
+
+    LOG_DBG("Mouse-to-RC state: %s", state->enabled ? "enabled" : "disabled");
+
+    return sizeof(cmd_header_t) + sizeof(cmd_rc_mouse_rc_state_t);
+}
+
+/**
+ * Build device mode state response
+ */
+size_t protocol_build_mode_state(uint8_t *buffer)
+{
+    cmd_header_t *header = (cmd_header_t *)buffer;
+    cmd_mode_state_t *state = (cmd_mode_state_t *)(buffer + sizeof(cmd_header_t));
+
+    device_mode_t mode = device_mode_get();
+    const device_mode_info_t *info = device_mode_get_info(mode);
+
+    header->type = CMD_MODE_STATE;
+    header->length = sizeof(cmd_mode_state_t);
+
+    state->current_mode = (uint8_t)mode;
+    state->features = info->features;
+
+    /* Copy mode name */
+    size_t name_len = strlen(info->name);
+    if (name_len > MODE_NAME_MAX_LEN) {
+        name_len = MODE_NAME_MAX_LEN;
+    }
+    state->name_len = (uint8_t)name_len;
+    memcpy(state->name, info->name, name_len);
+
+    LOG_DBG("Mode state: mode=%u (%s), features=0x%02x",
+            state->current_mode, info->name, state->features);
+
+    return sizeof(cmd_header_t) + sizeof(cmd_mode_state_t);
 }

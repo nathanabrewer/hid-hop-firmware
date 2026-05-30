@@ -25,10 +25,10 @@
 #elif defined(CONFIG_BOARD_XIAO_NRF52840)
 #define GPIO_LED_COUNT    3
 #define GPIO_BTN_COUNT    0
-#define GPIO_RELAY_COUNT  0
+#define GPIO_RELAY_COUNT  2   /* D7 (P1.12), D8 (P1.13) */
 #define GPIO_DIN_COUNT    0
 #define GPIO_AIN_COUNT    0
-#define GPIO_RC_COUNT     2   /* RC PWM channels on D0, D1 */
+#define GPIO_RC_COUNT     2   /* RC PWM channels on D9, D10 */
 #else
 /* Default/DK board */
 #define GPIO_LED_COUNT    4
@@ -169,8 +169,13 @@ static inline void gpio_rc_set_failsafe(bool enabled) { (void)enabled; }
 static inline bool gpio_rc_failsafe_enabled(void) { return false; }
 #endif
 
-/* Stub functions for boards without relay/din/ain */
-#if GPIO_RELAY_COUNT == 0
+/* Relay functions */
+#if GPIO_RELAY_COUNT > 0
+bool gpio_relay_set(uint8_t index, bool on);
+bool gpio_relay_get(uint8_t index);
+void gpio_relay_set_all(uint8_t state);
+uint8_t gpio_relay_get_all(void);
+#else
 static inline bool gpio_relay_set(uint8_t index, bool on) { (void)index; (void)on; return false; }
 static inline bool gpio_relay_get(uint8_t index) { (void)index; return false; }
 static inline void gpio_relay_set_all(uint8_t state) { (void)state; }

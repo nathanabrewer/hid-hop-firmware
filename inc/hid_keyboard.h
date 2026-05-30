@@ -63,4 +63,43 @@ bool hid_keyboard_tap(uint8_t keycode, uint8_t modifiers);
  */
 bool ascii_to_hid_keycode(uint8_t ascii, uint8_t *keycode, bool *needs_shift);
 
+/**
+ * Get current keyboard LED state from host PC
+ * @return LED state bitmask:
+ *         Bit 0: NumLock
+ *         Bit 1: CapsLock
+ *         Bit 2: ScrollLock
+ *         Bit 3: Compose
+ *         Bit 4: Kana
+ */
+uint8_t hid_keyboard_get_led_state(void);
+
+/**
+ * Check if NumLock is active on host
+ */
+bool hid_keyboard_numlock_on(void);
+
+/**
+ * Check if CapsLock is active on host
+ */
+bool hid_keyboard_capslock_on(void);
+
+/**
+ * Check if ScrollLock is active on host
+ */
+bool hid_keyboard_scrolllock_on(void);
+
+/**
+ * Check and clear LED state changed flag
+ * @return true if LED state changed since last check
+ */
+bool hid_keyboard_led_state_changed(void);
+
+/* LED state bit definitions */
+#define HID_LED_NUMLOCK     (1 << 0)
+#define HID_LED_CAPSLOCK    (1 << 1)
+#define HID_LED_SCROLLLOCK  (1 << 2)
+#define HID_LED_COMPOSE     (1 << 3)
+#define HID_LED_KANA        (1 << 4)
+
 #endif /* HID_KEYBOARD_H */

@@ -8,6 +8,7 @@
 #include "mesh_hid.h"
 #include "gpio_control.h"
 #include "device_mode.h"
+#include "config.h"
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/uart.h>
@@ -593,6 +594,18 @@ static void handle_local_command(const char *line, size_t len)
             (invert & MESH_RC_INVERT_CH1) ? "true" : "false",
             (invert & MESH_RC_SWAP_CHANNELS) ? "true" : "false");
         jsonl_serial_send_event("rc_invert", data);
+    }
+    else if (strstr(line, "\"cmd\":\"mouse_rc\"")) {
+        /* {"cmd":"mouse_rc","enabled":true} or {"cmd":"mouse_rc"} to query */
+        if (strstr(line, "\"enabled\":true")) {
+            config_set_mouse_to_rc(true);
+        } else if (strstr(line, "\"enabled\":false")) {
+            config_set_mouse_to_rc(false);
+        }
+        char data[32];
+        snprintf(data, sizeof(data), "\"enabled\":%s",
+                 config_get_mouse_to_rc() ? "true" : "false");
+        jsonl_serial_send_event("mouse_rc", data);
     }
     else if (strstr(line, "\"cmd\":\"peers\"")) {
         /* List all known peers with stale status */

@@ -7,6 +7,7 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/init.h>
+#include <zephyr/sys/reboot.h>
 
 /*
  * Debug boot LED blinks - helps identify which init stage crashes.
@@ -334,6 +335,47 @@ static void ble_command_handler(const uint8_t *data, size_t length)
         ble_hid_service_send_response(response, response_len);
         return;
 
+    case CMD_GET_KBD_LEDS:
+        /* Send keyboard LED state (NumLock, CapsLock, etc.) */
+        response_len = protocol_build_kbd_leds_state(response);
+        ble_hid_service_send_response(response, response_len);
+        return;
+
+    case CMD_RC_GET:
+        /* Send single RC channel state */
+        if (length >= sizeof(cmd_header_t) + sizeof(cmd_rc_get_t)) {
+            const cmd_rc_get_t *rc_cmd = (const cmd_rc_get_t *)payload;
+            response_len = protocol_build_rc_state(response, rc_cmd->channel);
+            ble_hid_service_send_response(response, response_len);
+        }
+        return;
+
+    case CMD_RC_GET_ALL:
+        /* Send all RC channel states */
+        response_len = protocol_build_rc_state_all(response);
+        ble_hid_service_send_response(response, response_len);
+        return;
+
+    case CMD_RC_GET_MOUSE_RC:
+        /* Send mouse-to-RC routing state */
+        response_len = protocol_build_mouse_rc_state(response);
+        ble_hid_service_send_response(response, response_len);
+        return;
+
+    case CMD_GET_MODE:
+        /* Send current device mode */
+        response_len = protocol_build_mode_state(response);
+        ble_hid_service_send_response(response, response_len);
+        return;
+
+    case CMD_REBOOT:
+        /* Send OK status before rebooting */
+        response_len = protocol_build_status(response, STATUS_OK, CMD_REBOOT);
+        ble_hid_service_send_response(response, response_len);
+        k_msleep(100);  /* Let response send */
+        sys_reboot(SYS_REBOOT_COLD);
+        return;
+
     default:
         break;
     }
@@ -571,6 +613,10 @@ int main(void)
         } else {
             dk_set_led_off(BLE_CONNECTED_LED);
         }
+
+        /* Check for keyboard LED state changes (NumLock/CapsLock/ScrollLock)
+         * and notify BLE clients if subscribed */
+        ble_hid_service_check_kbd_leds();
 
         /* Track uptime */
         int64_t now = k_uptime_get();

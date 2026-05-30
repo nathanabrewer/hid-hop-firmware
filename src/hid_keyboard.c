@@ -74,6 +74,10 @@ static struct keyboard_report report;
 static K_SEM_DEFINE(hid_sem, 1, 1);
 static bool initialized = false;
 
+/* LED state from host (NumLock, CapsLock, ScrollLock, Compose, Kana) */
+static uint8_t keyboard_led_state = 0;
+static bool led_state_changed = false;
+
 /* Timing constants */
 #define KEY_PRESS_DELAY_MS   10
 #define KEY_RELEASE_DELAY_MS 10
@@ -85,8 +89,117 @@ static void hid_int_in_ready_cb(const struct device *dev)
     k_sem_give(&hid_sem);
 }
 
+/**
+ * Callback for SET_REPORT from host (LED state updates)
+ * LED bits: 0=NumLock, 1=CapsLock, 2=ScrollLock, 3=Compose, 4=Kana
+ *
+ * Note: When using Report IDs, the first byte is the report ID.
+ * Our keyboard uses Report ID 1, so LED data is at offset 1.
+ */
+static int hid_set_report_cb(const struct device *dev,
+                              struct usb_setup_packet *setup,
+                              int32_t *len, uint8_t **data)
+{
+    ARG_UNUSED(dev);
+
+    LOG_INF("SET_REPORT cb: len=%d, wValue=0x%04x, wIndex=0x%04x",
+            *len, setup->wValue, setup->wIndex);
+
+    if (*len > 0 && *data != NULL) {
+        /* Log raw data for debugging */
+        LOG_HEXDUMP_INF(*data, *len, "SET_REPORT data");
+
+        /*
+         * Report format with Report ID:
+         * Byte 0: Report ID (0x01)
+         * Byte 1: LED state bitmask
+         *
+         * Without Report ID (len=1), data[0] is LED state directly.
+         */
+        uint8_t new_state;
+        if (*len >= 2) {
+            /* Has report ID prefix */
+            new_state = (*data)[1];
+        } else {
+            /* No report ID, LED state is first byte */
+            new_state = (*data)[0];
+        }
+
+        if (new_state != keyboard_led_state) {
+            keyboard_led_state = new_state;
+            led_state_changed = true;
+            LOG_INF("LED state changed: Num=%d Caps=%d Scroll=%d",
+                    (keyboard_led_state >> 0) & 0x01,
+                    (keyboard_led_state >> 1) & 0x01,
+                    (keyboard_led_state >> 2) & 0x01);
+        }
+    }
+
+    return 0;
+}
+
+/**
+ * Callback for interrupt OUT endpoint (LED state via interrupt pipe)
+ * Some hosts send LED state via interrupt OUT instead of SET_REPORT.
+ */
+static void hid_int_out_ready_cb(const struct device *dev)
+{
+    uint8_t report_buf[8];
+    uint32_t read_len;
+    int ret;
+
+    ret = hid_int_ep_read(dev, report_buf, sizeof(report_buf), &read_len);
+    if (ret < 0) {
+        LOG_ERR("INT OUT read failed: %d", ret);
+        return;
+    }
+
+    LOG_INF("INT OUT report: len=%u", read_len);
+    LOG_HEXDUMP_INF(report_buf, read_len, "INT OUT data");
+
+    if (read_len > 0) {
+        /*
+         * Report format depends on whether Report ID is used:
+         * - With Report ID: byte 0 = Report ID, byte 1 = LED state
+         * - Without Report ID: byte 0 = LED state
+         */
+        uint8_t new_state;
+        if (read_len >= 2 && report_buf[0] == 0x01) {
+            /* Has report ID prefix */
+            new_state = report_buf[1];
+        } else {
+            /* No report ID */
+            new_state = report_buf[0];
+        }
+
+        if (new_state != keyboard_led_state) {
+            keyboard_led_state = new_state;
+            led_state_changed = true;
+            LOG_INF("LED state changed (INT OUT): Num=%d Caps=%d Scroll=%d",
+                    (keyboard_led_state >> 0) & 0x01,
+                    (keyboard_led_state >> 1) & 0x01,
+                    (keyboard_led_state >> 2) & 0x01);
+        }
+    }
+}
+
+/**
+ * Callback for protocol change (boot protocol <-> report protocol)
+ * Boot protocol (protocol=0) is simpler and guarantees LED state delivery
+ * Report protocol (protocol=1) is the default with full HID capabilities
+ */
+static void hid_protocol_change_cb(const struct device *dev, uint8_t protocol)
+{
+    ARG_UNUSED(dev);
+    LOG_INF("HID protocol changed to: %s (%u)",
+            protocol == 0 ? "BOOT" : "REPORT", protocol);
+}
+
 static const struct hid_ops keyboard_ops = {
     .int_in_ready = hid_int_in_ready_cb,
+    .int_out_ready = hid_int_out_ready_cb,
+    .set_report = hid_set_report_cb,
+    .protocol_change = hid_protocol_change_cb,
 };
 
 /**
@@ -428,4 +541,53 @@ bool hid_keyboard_tap(uint8_t keycode, uint8_t modifiers)
     }
     k_sleep(K_MSEC(KEY_PRESS_DELAY_MS));
     return hid_keyboard_release_all();
+}
+
+/**
+ * Get current keyboard LED state from host
+ * @return LED state bitmask:
+ *         Bit 0: NumLock
+ *         Bit 1: CapsLock
+ *         Bit 2: ScrollLock
+ *         Bit 3: Compose
+ *         Bit 4: Kana
+ */
+uint8_t hid_keyboard_get_led_state(void)
+{
+    return keyboard_led_state;
+}
+
+/**
+ * Check if NumLock is active
+ */
+bool hid_keyboard_numlock_on(void)
+{
+    return (keyboard_led_state & 0x01) != 0;
+}
+
+/**
+ * Check if CapsLock is active
+ */
+bool hid_keyboard_capslock_on(void)
+{
+    return (keyboard_led_state & 0x02) != 0;
+}
+
+/**
+ * Check if ScrollLock is active
+ */
+bool hid_keyboard_scrolllock_on(void)
+{
+    return (keyboard_led_state & 0x04) != 0;
+}
+
+/**
+ * Check and clear LED state changed flag
+ * @return true if LED state changed since last check
+ */
+bool hid_keyboard_led_state_changed(void)
+{
+    bool changed = led_state_changed;
+    led_state_changed = false;
+    return changed;
 }
