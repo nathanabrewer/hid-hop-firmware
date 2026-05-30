@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HID-HOP Web Flasher</title>
+<style>
+  :root{
+    --bg:#070607; --panel:#140a18; --border:#3a1d4a; --text:#f0e6f5;
+    --muted:#a98bb8; --accent:#8a04d0; --accent2:#c026d3; --good:#3fb950; --bad:#f85149; --warn:#d29922;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+    background:
+      radial-gradient(900px 500px at 50% -8%, rgba(138,4,208,.28), transparent 60%),
+      var(--bg);
+    background-attachment:fixed;
+    color:var(--text); line-height:1.5;
+  }
+  .wrap{max-width:760px; margin:0 auto; padding:32px 20px 80px}
+  header h1{font-size:1.9rem; margin:0 0 4px}
+  header p{color:var(--muted); margin:0 0 24px}
+  .card{
+    background:var(--panel); border:1px solid var(--border); border-radius:12px;
+    padding:20px 22px; margin:0 0 20px;
+  }
+  .card h2{font-size:1.1rem; margin:0 0 12px}
+  button{
+    font:inherit; font-weight:600; border:0; border-radius:8px; cursor:pointer;
+    padding:11px 18px; color:#fff; transition:filter .15s;
+    background:linear-gradient(135deg, var(--accent), var(--accent2));
+  }
+  button:hover:not(:disabled){filter:brightness(1.1)}
+  button:disabled{opacity:.45; cursor:not-allowed}
+  button.ghost{background:transparent; border:1px solid var(--border); color:var(--text)}
+  .row{display:flex; gap:10px; flex-wrap:wrap; align-items:center}
+  .step{display:flex; gap:12px; margin:0 0 14px}
+  .step .n{
+    flex:0 0 26px; height:26px; border-radius:50%; background:var(--border);
+    display:grid; place-items:center; font-size:.8rem; font-weight:700; color:var(--text);
+  }
+  .step .body{flex:1}
+  .step .body b{display:block}
+  .step .body span{color:var(--muted); font-size:.92rem}
+  code{background:#010409; padding:2px 6px; border-radius:5px; font-size:.88em}
+  kbd{background:#21262d;border:1px solid var(--border);border-bottom-width:2px;border-radius:5px;padding:1px 6px;font-size:.85em}
+  #progwrap{margin-top:14px; display:none}
+  #progbar{height:10px; background:#010409; border-radius:6px; overflow:hidden}
+  #progfill{height:100%; width:0%; background:var(--good); transition:width .2s}
+  #progtext{font-size:.85rem; color:var(--muted); margin-top:6px}
+  #log{
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.8rem;
+    background:#010409; border:1px solid var(--border); border-radius:8px;
+    padding:12px; height:170px; overflow:auto; white-space:pre-wrap; margin-top:14px; display:none;
+  }
+  .badge{display:inline-block;padding:2px 9px;border-radius:20px;font-size:.78rem;font-weight:600;border:1px solid}
+  .badge.ok{color:var(--good);border-color:var(--good)}
+  .badge.no{color:var(--bad);border-color:var(--bad)}
+  .thanks{border-color:#2f4b2f}
+  .thanks a{color:var(--accent);text-decoration:none}
+  .thanks a:hover{text-decoration:underline}
+  .heart{color:#f778ba}
+  .muted{color:var(--muted)}
+  .notice{background:#1c2128;border-left:3px solid var(--warn);padding:10px 14px;border-radius:0 8px 8px 0;font-size:.9rem;margin:0 0 16px}
+  footer{color:var(--muted);font-size:.82rem;text-align:center;margin-top:32px}
+  footer a{color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header style="text-align:center">
+    <img src="images/hopguy.png" alt="HID-HOP" width="120" height="120"
+         style="image-rendering:auto;filter:drop-shadow(0 0 24px rgba(138,4,208,.55));margin-bottom:6px">
+    <h1 style="background:linear-gradient(90deg,#c026d3,#8a04d0);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent">HID-HOP Web Flasher</h1>
+    <p style="max-width:520px;margin:0 auto 24px">Flash the HID-HOP firmware to your Raytac MDBT50Q&#8209;CX&#8209;40 dongle — right from your browser. No toolchain, no compiling.</p>
+  </header>
+
+  <div id="compat" class="notice">Checking browser compatibility…</div>
+
+  <div class="card">
+    <h2>How it works</h2>
+    <div class="step"><div class="n">1</div><div class="body"><b>Enter DFU mode</b><span>Unplug the dongle. <b>Hold the button</b> and plug it back in while holding. Release after ~1 second. The LED pattern changes to show it's in the bootloader.</span></div></div>
+    <div class="step"><div class="n">2</div><div class="body"><b>Connect</b><span>Click <i>Connect &amp; Flash</i> and pick the dongle's serial port in the browser prompt (often labelled <code>Open DFU Bootloader</code> or an <code>nRF</code> / <code>SEGGER</code> port).</span></div></div>
+    <div class="step"><div class="n">3</div><div class="body"><b>Done</b><span>The firmware streams over, the dongle reboots, and shows up as a USB HID device. That's it.</span></div></div>
+  </div>
+
+  <div class="card">
+    <h2>Flash</h2>
+    <div class="row">
+      <button id="flashBtn" disabled>Connect &amp; Flash</button>
+      <button id="logBtn" class="ghost" type="button">Show log</button>
+      <span id="status" class="muted">Idle.</span>
+    </div>
+    <div id="progwrap">
+      <div id="progbar"><div id="progfill"></div></div>
+      <div id="progtext"></div>
+    </div>
+    <div id="log"></div>
+  </div>
+
+  <div class="card thanks">
+    <h2>Shoutouts &amp; thanks <span class="heart">♥</span></h2>
+    <p class="muted" style="margin-top:0">This flasher exists because of the folks in our
+      <a href="https://github.com/nathanabrewer/hid-hop-firmware/issues" target="_blank" rel="noopener">issues</a>:</p>
+    <ul>
+      <li><b><a href="https://github.com/drhaitch" target="_blank" rel="noopener">@drhaitch</a></b> —
+        for asking the obvious-in-hindsight question: <i>"can I just get a compiled firmware and drop it on the dongle?"</i>
+        You were right to ask. This page is the answer. 🙌</li>
+      <li><b><a href="https://github.com/jacobmarciniec" target="_blank" rel="noopener">@jacobmarciniec</a></b> —
+        for jumping in to help a stranger compile it, README-in-hand, and being lovely about it.
+        That kindness is the whole vibe. 🤝</li>
+    </ul>
+    <p class="muted" style="margin-bottom:0">Thank you both. Open hardware is better with people like you in the threads.</p>
+  </div>
+
+  <footer>
+    HID-HOP · nRF52840 BLE&#8202;→&#8202;USB HID bridge ·
+    <a href="https://github.com/nathanabrewer/hid-hop-firmware" target="_blank" rel="noopener">source on GitHub</a><br>
+    Built with the Nordic Secure DFU protocol over the Web Serial API.<br>
+    <span id="fwinfo" class="muted">firmware build: loading…</span>
+  </footer>
+</div>
+
+<script>
+"use strict";
+/* ---------- Nordic Secure DFU over Web Serial ---------- */
+/* Firmware artifacts (extracted from the DFU package at build time) */
+const FW_DAT = "firmware/zephyr.dat";
+const FW_BIN = "firmware/zephyr.bin";
+
+/* DFU opcodes */
+const OP = { CREATE:0x01, SET_PRN:0x02, CALC_CRC:0x03, EXECUTE:0x04, SELECT:0x06, RESPONSE:0x60 };
+const OBJ = { COMMAND:0x01, DATA:0x02 };
+const RES_SUCCESS = 0x01;
+
+/* ----- CRC32 (IEEE, same as zlib / Nordic) ----- */
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n=0;n<256;n++){ let c=n; for(let k=0;k<8;k++) c = c&1 ? 0xEDB88320 ^ (c>>>1) : c>>>1; t[n]=c>>>0; }
+  return t;
+})();
+function crc32(bytes, seed){
+  // seed is a previously-returned crc (running CRC across objects); 0 to start fresh
+  let crc = (seed===undefined ? 0 : seed) ^ 0xFFFFFFFF;
+  for (let i=0;i<bytes.length;i++) crc = CRC_TABLE[(crc ^ bytes[i]) & 0xFF] ^ (crc>>>8);
+  return (crc ^ 0xFFFFFFFF)>>>0;
+}
+
+/* ----- SLIP encode/decode (RFC 1055) ----- */
+const SLIP_END=0xC0, SLIP_ESC=0xDB, SLIP_ESC_END=0xDC, SLIP_ESC_ESC=0xDD;
+function slipEncode(data){
+  const out=[SLIP_END];           // leading END is optional but harmless; Nordic accepts trailing END
+  for (const b of data){
+    if (b===SLIP_END){ out.push(SLIP_ESC,SLIP_ESC_END); }
+    else if (b===SLIP_ESC){ out.push(SLIP_ESC,SLIP_ESC_ESC); }
+    else out.push(b);
+  }
+  out.push(SLIP_END);
+  return Uint8Array.from(out);
+}
+class SlipDecoder{
+  constructor(){ this.buf=[]; this.esc=false; }
+  /* push raw bytes, returns array of complete frames (Uint8Array) */
+  push(chunk){
+    const frames=[];
+    for (const b of chunk){
+      if (this.esc){
+        this.buf.push(b===SLIP_ESC_END?SLIP_END:b===SLIP_ESC_ESC?SLIP_ESC:b);
+        this.esc=false; continue;
+      }
+      if (b===SLIP_ESC){ this.esc=true; continue; }
+      if (b===SLIP_END){
+        if (this.buf.length){ frames.push(Uint8Array.from(this.buf)); this.buf=[]; }
+        continue;
+      }
+      this.buf.push(b);
+    }
+    return frames;
+  }
+}
+
+/* ----- UI helpers ----- */
+const $ = s => document.querySelector(s);
+const statusEl=$("#status"), logEl=$("#log"), flashBtn=$("#flashBtn");
+const progWrap=$("#progwrap"), progFill=$("#progfill"), progText=$("#progtext");
+function log(msg){ const t=new Date().toISOString().substr(11,8); logEl.textContent+=`[${t}] ${msg}\n`; logEl.scrollTop=logEl.scrollHeight; }
+function setStatus(msg,cls){ statusEl.textContent=msg; statusEl.className=cls||"muted"; }
+function setProgress(done,total,label){
+  progWrap.style.display="block";
+  const pct = total?Math.round(done/total*100):0;
+  progFill.style.width=pct+"%";
+  progText.textContent=`${label} — ${pct}% (${(done/1024).toFixed(1)} / ${(total/1024).toFixed(1)} KB)`;
+}
+
+/* ----- DFU transport ----- */
+class SerialDfu{
+  constructor(port){ this.port=port; this.decoder=new SlipDecoder(); this.pending=null; this.reading=false; }
+  async open(){
+    await this.port.open({ baudRate:115200 });
+    this.writer=this.port.writable.getWriter();
+    this.reader=this.port.readable.getReader();
+    this._readLoop();
+  }
+  async close(){
+    try{ if(this.reader){ await this.reader.cancel(); this.reader.releaseLock(); } }catch(e){}
+    try{ if(this.writer){ this.writer.releaseLock(); } }catch(e){}
+    try{ await this.port.close(); }catch(e){}
+  }
+  async _readLoop(){
+    this.reading=true;
+    try{
+      while(this.reading){
+        const {value,done}=await this.reader.read();
+        if(done) break;
+        if(!value) continue;
+        for(const frame of this.decoder.push(value)){
+          if(this.pending){ const p=this.pending; this.pending=null; p.resolve(frame); }
+        }
+      }
+    }catch(e){ if(this.pending){ this.pending.reject(e); this.pending=null; } }
+  }
+  /* send raw bytes (no response expected) */
+  async writeRaw(bytes){ await this.writer.write(slipEncode(bytes)); }
+  /* send a request and await the SLIP response frame */
+  async request(bytes, timeoutMs=5000){
+    if(this.pending) throw new Error("request already in flight");
+    const p = new Promise((resolve,reject)=>{ this.pending={resolve,reject}; });
+    const timer = setTimeout(()=>{ if(this.pending){ this.pending.reject(new Error("DFU response timeout")); this.pending=null; } }, timeoutMs);
+    await this.writer.write(slipEncode(bytes));
+    const frame = await p; clearTimeout(timer);
+    if(frame[0]!==OP.RESPONSE) throw new Error("bad response marker 0x"+frame[0].toString(16));
+    const op=frame[1], result=frame[2];
+    if(result!==RES_SUCCESS) throw new Error(`DFU op 0x${op.toString(16)} failed, result 0x${result.toString(16)}`);
+    return frame.slice(3); // payload
+  }
+  /* high-level ops */
+  async setPrn(n){ await this.request([OP.SET_PRN, n&0xff, (n>>8)&0xff]); }
+  async select(objType){
+    const pl = await this.request([OP.SELECT, objType]);
+    const dv = new DataView(pl.buffer, pl.byteOffset, pl.byteLength);
+    return { maxSize:dv.getUint32(0,true), offset:dv.getUint32(4,true), crc:dv.getUint32(8,true) };
+  }
+  async createObject(objType,size){
+    const b=[OP.CREATE,objType, size&0xff,(size>>8)&0xff,(size>>16)&0xff,(size>>>24)&0xff];
+    await this.request(b);
+  }
+  async calcCrc(){
+    const pl=await this.request([OP.CALC_CRC]);
+    const dv=new DataView(pl.buffer,pl.byteOffset,pl.byteLength);
+    return { offset:dv.getUint32(0,true), crc:dv.getUint32(4,true) };
+  }
+  async execute(){ await this.request([OP.EXECUTE], 10000); }
+}
+
+/* ----- transfer one object (command or data), with one retry on CRC mismatch ----- */
+async function streamObject(dfu, objType, data, maxChunk, prnRunningCrc, onProgress){
+  // split into <= maxSize objects, write data, validate crc, execute
+  let offset=0, runningCrc = prnRunningCrc||0;
+  while(offset<data.length){
+    const chunk = data.subarray(offset, Math.min(offset+maxChunk, data.length));
+    await dfu.createObject(objType, chunk.length);
+    // write chunk in serial-MTU sized pieces (SLIP framed)
+    const MTU=244;
+    for(let i=0;i<chunk.length;i+=MTU){
+      await dfu.writeRaw(chunk.subarray(i, Math.min(i+MTU, chunk.length)));
+    }
+    runningCrc = crc32(chunk, runningCrc);
+    const res = await dfu.calcCrc();
+    if(res.crc!==runningCrc) throw new Error(`CRC mismatch at offset ${offset+chunk.length} (device 0x${res.crc.toString(16)} != local 0x${runningCrc.toString(16)})`);
+    await dfu.execute();
+    offset += chunk.length;
+    if(onProgress) onProgress(offset, data.length);
+  }
+  return runningCrc;
+}
+
+async function flash(){
+  flashBtn.disabled=true; logEl.style.display="block";
+  try{
+    setStatus("Fetching firmware…");
+    log("Fetching firmware artifacts…");
+    const [datR,binR] = await Promise.all([fetch(FW_DAT),fetch(FW_BIN)]);
+    if(!datR.ok||!binR.ok) throw new Error("Could not load firmware files from this page.");
+    const dat=new Uint8Array(await datR.arrayBuffer());
+    const bin=new Uint8Array(await binR.arrayBuffer());
+    log(`Init packet: ${dat.length} bytes · Firmware: ${(bin.length/1024).toFixed(1)} KB`);
+
+    setStatus("Requesting serial port…");
+    const port = await navigator.serial.requestPort();
+    const dfu = new SerialDfu(port);
+    log("Opening port @ 115200…");
+    await dfu.open();
+
+    setStatus("Negotiating…",""); log("SET_PRN(0)");
+    await dfu.setPrn(0);
+
+    // ---- command object (init packet) ----
+    log("Sending init packet (command object)…");
+    const cmdSel = await dfu.select(OBJ.COMMAND);
+    log(`  command obj max size: ${cmdSel.maxSize}`);
+    if(dat.length>cmdSel.maxSize) throw new Error("init packet larger than device command buffer");
+    await streamObject(dfu, OBJ.COMMAND, dat, cmdSel.maxSize, 0);
+    log("Init packet accepted.");
+
+    // ---- data object (firmware) ----
+    setStatus("Flashing firmware…");
+    log("Streaming firmware (data objects)…");
+    const dataSel = await dfu.select(OBJ.DATA);
+    const maxChunk = dataSel.maxSize || 4096;
+    log(`  data obj max size: ${maxChunk}`);
+    await streamObject(dfu, OBJ.DATA, bin, maxChunk, 0, (done,total)=>setProgress(done,total,"Flashing"));
+
+    log("Transfer complete. Device will reboot.");
+    setStatus("✅ Done! The dongle is rebooting into HID-HOP.","badge ok");
+    progText.textContent="Flash complete.";
+    try{ await dfu.close(); }catch(e){}
+  }catch(err){
+    console.error(err);
+    log("ERROR: "+err.message);
+    setStatus("❌ "+err.message,"badge no");
+  }finally{
+    flashBtn.disabled=false;
+  }
+}
+
+/* ----- compat + wiring ----- */
+(function init(){
+  const c=$("#compat");
+  if(!("serial" in navigator)){
+    c.innerHTML='<b>This browser can’t flash.</b> The Web Serial API is needed. Please use <b>Chrome</b>, <b>Edge</b>, or another Chromium browser on desktop (not iOS/Safari/Firefox).';
+    c.style.borderColor="var(--bad)";
+    flashBtn.disabled=true; flashBtn.title="Web Serial not supported";
+    return;
+  }
+  c.innerHTML='✅ Your browser supports Web Serial. You’re good to go.';
+  c.style.borderColor="var(--good)";
+  flashBtn.disabled=false;
+  flashBtn.addEventListener("click",flash);
+})();
+/* show firmware provenance */
+fetch("firmware/build-info.json").then(r=>r.json()).then(b=>{
+  $("#fwinfo").textContent=`firmware: ${b.board} · commit ${b.git_sha} · ${(b.bin_bytes/1024|0)} KB`;
+}).catch(()=>{ $("#fwinfo").textContent=""; });
+
+$("#logBtn").addEventListener("click",()=>{
+  const v=logEl.style.display!=="none"; logEl.style.display=v?"none":"block";
+  $("#logBtn").textContent=v?"Show log":"Hide log";
+});
+</script>
+</body>
+</html>

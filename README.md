@@ -12,6 +12,22 @@
   Encrypted keyboard/mouse control over BLE Mesh
 </p>
 
+<p align="center">
+  <a href="https://nathanabrewer.github.io/hid-hop-firmware/"><strong>⚡ Flash it in your browser →</strong></a>
+</p>
+
+---
+
+## 🔌 No-toolchain flashing (Web Flasher)
+
+Don't want to install an SDK and compile? You don't have to.
+
+1. Open the **[HID-HOP Web Flasher](https://nathanabrewer.github.io/hid-hop-firmware/)** in **Chrome** or **Edge** (desktop).
+2. Put the Raytac dongle in **DFU mode**: unplug it, hold the button, plug it back in while holding, release after ~1 second.
+3. Click **Connect & Flash**, pick the dongle's serial port, and you're done.
+
+It flashes a prebuilt firmware image straight from the browser over the Nordic Secure DFU protocol (Web Serial API) — no `nrfutil`, no Docker, no west. Prefer to build it yourself? See [Building](#build-system) below, or run `scripts/build-release.sh`.
+
 ---
 
 ## What is HID-HOP?

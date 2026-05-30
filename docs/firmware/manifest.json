@@ -1,0 +1,8 @@
+{
+    "manifest": {
+        "application": {
+            "bin_file": "zephyr.bin",
+            "dat_file": "zephyr.dat"
+        }
+    }
+}
