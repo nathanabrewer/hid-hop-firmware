@@ -57,9 +57,15 @@
 			label = "image-0";
 			reg = <0x00001000 0x000df000>;
 		};
-		storage_partition: partition@e0000 {
+		/* Raw flash for boot-critical config (CRC32 validated) */
+		config_partition: partition@e0000 {
+			label = "config";
+			reg = <0x000e0000 0x00001000>;
+		};
+		/* NVS for BLE bonding, settings, etc. */
+		storage_partition: partition@e1000 {
 			label = "storage";
-			reg = <0x000e0000 0x00020000>;
+			reg = <0x000e1000 0x0001f000>;
 		};
 	};
 };

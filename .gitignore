@@ -23,3 +23,11 @@ node_modules/
 # Claude
 .claude/
 CLAUDE.md
+
+dist/
+
+# Web flasher artifacts ARE published via GitHub Pages — keep them tracked
+# even though the global *.bin / *.hex rules above would otherwise ignore them.
+!docs/firmware/
+!docs/firmware/zephyr.bin
+!docs/firmware/zephyr.hex
