@@ -240,7 +240,14 @@ class SerialDfu{
         if(done) break;
         if(!value) continue;
         for(const frame of this.decoder.push(value)){
-          if(this.pending){ const p=this.pending; this.pending=null; p.resolve(frame); }
+          // Correlate replies to the in-flight request by echoed opcode (frame[1]).
+          // Anything else is a stale/leftover frame from a prior attempt — discard it
+          // so a single buffered response can't shift every reply by one.
+          if(this.pending && frame.length>=2 && frame[0]===OP.RESPONSE && frame[1]===this.pending.op){
+            const p=this.pending; this.pending=null; p.resolve(frame);
+          } else {
+            log("RX(skip stale) " + hex(frame));
+          }
         }
       }
     }catch(e){ if(this.pending){ this.pending.reject(e); this.pending=null; } }
@@ -250,13 +257,14 @@ class SerialDfu{
   /* send a request and await the SLIP response frame */
   async request(bytes, timeoutMs=5000){
     if(this.pending) throw new Error("request already in flight");
-    const p = new Promise((resolve,reject)=>{ this.pending={resolve,reject}; });
-    const timer = setTimeout(()=>{ if(this.pending){ this.pending.reject(new Error("DFU response timeout")); this.pending=null; } }, timeoutMs);
+    const reqOp = bytes[0];
+    const p = new Promise((resolve,reject)=>{ this.pending={resolve,reject,op:reqOp}; });
+    const timer = setTimeout(()=>{ if(this.pending){ this.pending.reject(new Error("DFU response timeout (op 0x"+reqOp.toString(16)+")")); this.pending=null; } }, timeoutMs);
     log("TX " + hex(bytes));
     await this.writer.write(slipEncode(bytes));
     const frame = await p; clearTimeout(timer);
     log("RX " + hex(frame));
-    if(frame.length<3 || frame[0]!==OP.RESPONSE)
+    if(frame.length<3)
       throw new Error("Unexpected reply ["+hex(frame)+"] — is this dongle in Nordic DFU mode? (UF2 dongles use Option 1 instead.)");
     const op=frame[1], result=frame[2];
     if(result!==RES_SUCCESS) throw new Error(`DFU op 0x${op.toString(16)} failed, result 0x${result.toString(16)}`);
