@@ -174,7 +174,9 @@ function crc32(bytes, seed){
 /* ----- SLIP encode/decode (RFC 1055) ----- */
 const SLIP_END=0xC0, SLIP_ESC=0xDB, SLIP_ESC_END=0xDC, SLIP_ESC_ESC=0xDD;
 function slipEncode(data){
-  const out=[SLIP_END];           // leading END is optional but harmless; Nordic accepts trailing END
+  // Trailing END only. A leading END would put C0 C0 between consecutive
+  // packets => an empty frame the bootloader answers with a spurious reply.
+  const out=[];
   for (const b of data){
     if (b===SLIP_END){ out.push(SLIP_ESC,SLIP_ESC_END); }
     else if (b===SLIP_ESC){ out.push(SLIP_ESC,SLIP_ESC_ESC); }
@@ -227,6 +229,7 @@ class SerialDfu{
     this.writer=this.port.writable.getWriter();
     this.reader=this.port.readable.getReader();
     this._readLoop();           // starts consuming; pending===null -> frames discarded
+    await this.writer.write(Uint8Array.from([SLIP_END]));  // terminate any partial frame on the device
     await sleep(400);           // flush stale responses left over from prior attempts
     this.decoder=new SlipDecoder();   // drop any half-frame, start clean
   }
