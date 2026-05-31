@@ -98,4 +98,18 @@ bool config_get_mouse_to_rc(void);
  */
 bool config_set_mouse_to_rc(bool enabled);
 
+/**
+ * Get the persisted default host OS for Unicode injection.
+ * Used when CMD_KEYBOARD_UNICODE is sent with os_mode = HOST_OS_DEFAULT (0xFF).
+ * @return host_os_t value (defaults to HOST_OS_LINUX_IBUS)
+ */
+uint8_t config_get_default_host_os(void);
+
+/**
+ * Set the persisted default host OS for Unicode injection.
+ * @param os_mode host_os_t (LINUX_IBUS / MACOS_HEX / WINDOWS_HEX)
+ * @return true on success
+ */
+bool config_set_default_host_os(uint8_t os_mode);
+
 #endif /* CONFIG_H */

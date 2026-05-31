@@ -53,6 +53,7 @@ static struct {
     uint8_t pin_length;
     uint8_t failed_attempts;
     bool mouse_to_rc;       /* Route mouse commands to RC PWM outputs */
+    uint8_t default_host_os; /* host_os_t default for CMD_KEYBOARD_UNICODE */
     bool initialized;
 } config;
 
@@ -231,6 +232,7 @@ static bool read_config_from_flash(void)
     config.pin_length = flash_data.pin_length;
     config.failed_attempts = flash_data.failed_attempts;
     config.mouse_to_rc = (flash_data._reserved[0] == 1);
+    config.default_host_os = flash_data._reserved[1];  /* 0 == HOST_OS_LINUX_IBUS */
 
     LOG_INF("Config loaded from flash: name='%s', version=%d, mouse_to_rc=%d",
             config.device_name, flash_data.version, config.mouse_to_rc);
@@ -257,6 +259,7 @@ static int write_config_to_flash(void)
     flash_data.pin_length = config.pin_length;
     flash_data.failed_attempts = config.failed_attempts;
     flash_data._reserved[0] = config.mouse_to_rc ? 1 : 0;
+    flash_data._reserved[1] = config.default_host_os;
 
     /* Compute CRC of everything except the CRC field */
     size_t crc_data_len = offsetof(config_flash_t, crc32);
@@ -340,6 +343,7 @@ static void setup_defaults(void)
 
     config.failed_attempts = 0;
     config.mouse_to_rc = true;
+    config.default_host_os = HOST_OS_LINUX_IBUS;
     config.initialized = true;
 
     LOG_INF("Using defaults: name='%s', PIN=%d digits, mouse_to_rc=ON",
@@ -707,5 +711,30 @@ bool config_set_mouse_to_rc(bool enabled)
     }
 
     LOG_INF("Mouse-to-RC routing: %s", enabled ? "enabled" : "disabled");
+    return true;
+}
+
+/**
+ * Get the default host OS for Unicode injection
+ */
+uint8_t config_get_default_host_os(void)
+{
+    return config.default_host_os;
+}
+
+/**
+ * Set the default host OS for Unicode injection
+ */
+bool config_set_default_host_os(uint8_t os_mode)
+{
+    config.default_host_os = os_mode;
+
+    int rc = write_config_to_flash();
+    if (rc) {
+        LOG_ERR("Failed to save default_host_os config: %d", rc);
+        return false;
+    }
+
+    LOG_INF("Default host OS for Unicode: %u", os_mode);
     return true;
 }

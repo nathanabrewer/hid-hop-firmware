@@ -10,6 +10,7 @@
 #include <zephyr/usb/class/usb_hid.h>
 
 #include "hid_keyboard.h"
+#include "protocol.h"   /* MOD_* flags, host_os_t */
 
 LOG_MODULE_REGISTER(hid_keyboard, LOG_LEVEL_INF);
 
@@ -541,6 +542,148 @@ bool hid_keyboard_tap(uint8_t keycode, uint8_t modifiers)
     }
     k_sleep(K_MSEC(KEY_PRESS_DELAY_MS));
     return hid_keyboard_release_all();
+}
+
+/* ===========================================================================
+ * Unicode injection (CMD_KEYBOARD_UNICODE)
+ *
+ * Emits the host OS's native Unicode-entry keystrokes. The hard parts the app
+ * can't do well live here: holding a modifier continuously across multiple key
+ * taps, and splitting supplementary-plane code points into a UTF-16 surrogate
+ * pair for macOS. Best-effort: requires an active Unicode input method on the
+ * host (see host_os_t docs). Will not work in a bare terminal.
+ * ===========================================================================
+ */
+
+/* US-layout HID keycode for a hex nibble 0..15. */
+static uint8_t hex_nibble_keycode(uint8_t nib)
+{
+    static const uint8_t digit_kc[10] = {
+        0x27, 0x1E, 0x1F, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26 /* 0-9 */
+    };
+    static const uint8_t alpha_kc[6] = {
+        0x04, 0x05, 0x06, 0x07, 0x08, 0x09 /* a-f */
+    };
+    nib &= 0x0F;
+    return (nib < 10) ? digit_kc[nib] : alpha_kc[nib - 10];
+}
+
+/* Tap a key while whatever is in report.modifiers stays held down. */
+static bool tap_with_held_modifiers(uint8_t keycode)
+{
+    report.keys[0] = keycode;
+    if (!send_report()) {
+        return false;
+    }
+    k_sleep(K_MSEC(KEY_PRESS_DELAY_MS));
+    report.keys[0] = 0;
+    if (!send_report()) {
+        return false;
+    }
+    k_sleep(K_MSEC(KEY_RELEASE_DELAY_MS));
+    return true;
+}
+
+/* Hex digits needed to represent cp (1..6), no leading zeros. */
+static uint8_t hex_width(uint32_t cp)
+{
+    uint8_t w = 1;
+    while (cp >> (4 * w)) {
+        w++;
+    }
+    return w;
+}
+
+/* Linux/IBus: Ctrl+Shift+U, release, hex digits, Space to commit. */
+static bool unicode_linux(uint32_t cp)
+{
+    if (!hid_keyboard_tap(0x18, MOD_LEFT_CTRL | MOD_LEFT_SHIFT)) {  /* U */
+        return false;
+    }
+    k_sleep(K_MSEC(KEY_PRESS_DELAY_MS));
+    for (int i = hex_width(cp) - 1; i >= 0; i--) {
+        if (!hid_keyboard_tap(hex_nibble_keycode((cp >> (4 * i)) & 0xF), MOD_NONE)) {
+            return false;
+        }
+    }
+    return hid_keyboard_tap(0x2C, MOD_NONE);  /* Space commits */
+}
+
+/* macOS: one UTF-16 code unit as exactly 4 hex digits, Option already held. */
+static bool unicode_macos_unit(uint16_t unit)
+{
+    for (int i = 3; i >= 0; i--) {
+        if (!tap_with_held_modifiers(hex_nibble_keycode((unit >> (4 * i)) & 0xF))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* macOS Unicode Hex Input: Option held throughout; supplementary-plane code
+ * points are entered as a UTF-16 surrogate pair (two 4-digit groups). */
+static bool unicode_macos(uint32_t cp)
+{
+    bool ok;
+    memset(&report.keys, 0, sizeof(report.keys));
+    report.modifiers = MOD_LEFT_ALT;  /* hold Option for the whole sequence */
+
+    if (cp <= 0xFFFF) {
+        ok = unicode_macos_unit((uint16_t)cp);
+    } else {
+        uint32_t v = cp - 0x10000;
+        ok = unicode_macos_unit(0xD800 + (uint16_t)(v >> 10)) &&
+             unicode_macos_unit(0xDC00 + (uint16_t)(v & 0x3FF));
+    }
+
+    report.modifiers = 0;             /* release Option */
+    report.keys[0] = 0;
+    return send_report() && ok;
+}
+
+/* Windows hex input / WinCompose: Alt held, Keypad-+, hex digits, release Alt. */
+static bool unicode_windows(uint32_t cp)
+{
+    memset(&report.keys, 0, sizeof(report.keys));
+    report.modifiers = MOD_LEFT_ALT;
+
+    bool ok = tap_with_held_modifiers(0x57);  /* Keypad + */
+    for (int i = hex_width(cp) - 1; ok && i >= 0; i--) {
+        ok = tap_with_held_modifiers(hex_nibble_keycode((cp >> (4 * i)) & 0xF));
+    }
+
+    report.modifiers = 0;             /* release Alt commits the character */
+    report.keys[0] = 0;
+    return send_report() && ok;
+}
+
+bool hid_keyboard_send_unicode(uint8_t os_mode, const uint32_t *codepoints, uint8_t count)
+{
+    if (!initialized || codepoints == NULL || count == 0) {
+        return false;
+    }
+
+    for (uint8_t i = 0; i < count; i++) {
+        uint32_t cp = codepoints[i];
+        bool ok;
+
+        switch (os_mode) {
+        case HOST_OS_LINUX_IBUS:  ok = unicode_linux(cp);   break;
+        case HOST_OS_MACOS_HEX:   ok = unicode_macos(cp);   break;
+        case HOST_OS_WINDOWS_HEX: ok = unicode_windows(cp); break;
+        default:
+            LOG_WRN("Unicode: unknown os_mode %u", os_mode);
+            return false;
+        }
+
+        if (!ok) {
+            LOG_ERR("Unicode: failed to inject U+%04X (os_mode %u)", cp, os_mode);
+            return false;
+        }
+        /* let the host commit each code point before the next in a sequence */
+        k_sleep(K_MSEC(KEY_RELEASE_DELAY_MS));
+    }
+    return true;
 }
 
 /**

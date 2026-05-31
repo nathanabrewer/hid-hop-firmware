@@ -40,6 +40,7 @@ typedef enum {
     CMD_KEYBOARD_COMBO      = 0x22,  /* Key combination (e.g., Ctrl+C) */
     CMD_KEYBOARD_SPECIAL    = 0x23,  /* Special keys (F1-F12, etc.) */
     CMD_MEDIA_KEY           = 0x24,  /* Media/consumer control keys */
+    CMD_KEYBOARD_UNICODE    = 0x25,  /* Inject Unicode code point(s) via host-native input method */
 
     /* Control commands: 0x40 - 0x5F */
     CMD_PING                = 0x40,  /* Keepalive/latency check */
@@ -123,6 +124,25 @@ typedef enum {
     MOD_RIGHT_ALT   = (1 << 6),
     MOD_RIGHT_GUI   = (1 << 7),
 } keyboard_modifier_t;
+
+/* ==========================================
+ * Host OS for Unicode injection (CMD_KEYBOARD_UNICODE)
+ *
+ * Each OS has its own Unicode-entry method, and each has a precondition:
+ *   LINUX_IBUS    - IBus/GTK Ctrl+Shift+U input mode must be available.
+ *   MACOS_HEX     - "Unicode Hex Input" keyboard layout must be ACTIVE.
+ *   WINDOWS_HEX   - EnableHexNumpad registry set, or WinCompose installed.
+ * None of these work in a bare terminal/TTY (no Unicode input method).
+ * HOST_OS_DEFAULT (0xFF) tells the firmware to use the persisted default
+ * (config_get_default_host_os).
+ * ==========================================
+ */
+typedef enum {
+    HOST_OS_LINUX_IBUS  = 0,
+    HOST_OS_MACOS_HEX   = 1,
+    HOST_OS_WINDOWS_HEX = 2,
+    HOST_OS_DEFAULT     = 0xFF,
+} host_os_t;
 
 /* ==========================================
  * Special Keys
@@ -233,6 +253,16 @@ typedef struct __attribute__((packed)) {
     uint16_t usage_id;  /* Consumer control usage ID (little-endian) */
     uint8_t action;     /* 0 = release, 1 = press, 2 = tap (press+release) */
 } cmd_media_key_t;
+
+/* Unicode injection payload (CMD_KEYBOARD_UNICODE).
+ * One or more code points are entered as a single grapheme cluster, so
+ * ZWJ / skin-tone / flag sequences (e.g. 👍🏽, 👨‍👩‍👧) go in one command. */
+#define MAX_UNICODE_CODEPOINTS 15   /* 2 + 4*15 = 62 <= MAX_KEYBOARD_PAYLOAD (64) */
+typedef struct __attribute__((packed)) {
+    uint8_t  os_mode;        /* host_os_t; 0xFF = use device default */
+    uint8_t  count;          /* number of code points that follow (1..MAX_UNICODE_CODEPOINTS) */
+    uint32_t codepoints[];   /* Unicode scalar values, little-endian */
+} cmd_keyboard_unicode_t;
 
 /* Ping/Pong payload */
 typedef struct __attribute__((packed)) {

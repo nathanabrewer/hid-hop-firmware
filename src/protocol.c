@@ -6,6 +6,7 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/byteorder.h>
 #include <string.h>
 
 #include "protocol.h"
@@ -374,6 +375,60 @@ static status_code_t handle_media_key(const uint8_t *data, size_t length)
 }
 
 /**
+ * Handle Unicode injection command (CMD_KEYBOARD_UNICODE)
+ *
+ * Payload: [os_mode:u8][count:u8][codepoint:u32 LE] x count
+ * os_mode HOST_OS_DEFAULT (0xFF) resolves to the persisted default host OS.
+ */
+static status_code_t handle_keyboard_unicode(const uint8_t *data, size_t length)
+{
+    if (length < 2) {  /* os_mode + count */
+        return STATUS_ERR_INVALID_LEN;
+    }
+
+    const cmd_keyboard_unicode_t *cmd = (const cmd_keyboard_unicode_t *)data;
+    uint8_t count = cmd->count;
+
+    if (count == 0 || count > MAX_UNICODE_CODEPOINTS ||
+        length < (size_t)(2 + 4 * count)) {
+        return STATUS_ERR_INVALID_LEN;
+    }
+
+    /* Resolve the device default if the app asked for it */
+    uint8_t os_mode = cmd->os_mode;
+    if (os_mode == HOST_OS_DEFAULT) {
+        os_mode = config_get_default_host_os();
+    }
+    if (os_mode != HOST_OS_LINUX_IBUS &&
+        os_mode != HOST_OS_MACOS_HEX &&
+        os_mode != HOST_OS_WINDOWS_HEX) {
+        return STATUS_ERR_INVALID_DATA;
+    }
+
+    /* Decode (little-endian) and validate each code point */
+    uint32_t cps[MAX_UNICODE_CODEPOINTS];
+    for (uint8_t i = 0; i < count; i++) {
+        uint32_t cp = sys_get_le32(data + 2 + 4 * i);
+        if (cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
+            return STATUS_ERR_INVALID_DATA;  /* out of range or lone surrogate */
+        }
+        cps[i] = cp;
+    }
+
+    LOG_DBG("Unicode inject: os=%u, %u code point(s)", os_mode, count);
+
+    if (!is_usb_ready()) {
+        return STATUS_ERR_USB_BUSY;
+    }
+
+    if (!hid_keyboard_send_unicode(os_mode, cps, count)) {
+        return STATUS_ERR_USB_FAILED;
+    }
+
+    return STATUS_OK;
+}
+
+/**
  * Handle ping command
  */
 static status_code_t handle_ping(const uint8_t *data, size_t length)
@@ -716,6 +771,8 @@ status_code_t protocol_process_command(const uint8_t *data, size_t length)
         return handle_keyboard_key(payload, payload_len);
     case CMD_MEDIA_KEY:
         return handle_media_key(payload, payload_len);
+    case CMD_KEYBOARD_UNICODE:
+        return handle_keyboard_unicode(payload, payload_len);
 
     /* Control commands */
     case CMD_PING:

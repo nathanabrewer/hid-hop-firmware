@@ -55,6 +55,23 @@ bool hid_keyboard_combo(const uint8_t *keycodes, uint8_t count, uint8_t modifier
 bool hid_keyboard_tap(uint8_t keycode, uint8_t modifiers);
 
 /**
+ * Inject Unicode code point(s) using the host OS's native Unicode-entry method.
+ * Holds modifiers across multi-key sequences (e.g. Option held while typing the
+ * hex digits on macOS) and splits supplementary-plane code points into UTF-16
+ * surrogate pairs where the host method requires it (macOS).
+ *
+ * Best-effort and host-context dependent: requires an active Unicode input
+ * method (IBus / Unicode Hex Input layout / WinCompose|EnableHexNumpad). Does
+ * NOT work in a bare terminal/TTY.
+ *
+ * @param os_mode    host_os_t (LINUX_IBUS / MACOS_HEX / WINDOWS_HEX)
+ * @param codepoints Array of Unicode scalar values
+ * @param count      Number of code points (entered as one grapheme cluster)
+ * @return true on success
+ */
+bool hid_keyboard_send_unicode(uint8_t os_mode, const uint32_t *codepoints, uint8_t count);
+
+/**
  * Convert ASCII character to HID keycode
  * @param ascii ASCII character
  * @param keycode Output keycode
