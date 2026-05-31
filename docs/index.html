@@ -154,7 +154,7 @@ const FW_DAT = "firmware/zephyr.dat";
 const FW_BIN = "firmware/zephyr.bin";
 
 /* DFU opcodes */
-const OP = { CREATE:0x01, SET_PRN:0x02, CALC_CRC:0x03, EXECUTE:0x04, SELECT:0x06, RESPONSE:0x60 };
+const OP = { CREATE:0x01, SET_PRN:0x02, CALC_CRC:0x03, EXECUTE:0x04, MTU_GET:0x07, SELECT:0x06, WRITE:0x08, RESPONSE:0x60 };
 const OBJ = { COMMAND:0x01, DATA:0x02 };
 const RES_SUCCESS = 0x01;
 
@@ -220,7 +220,7 @@ function setProgress(done,total,label){
 
 /* ----- DFU transport ----- */
 class SerialDfu{
-  constructor(port){ this.port=port; this.decoder=new SlipDecoder(); this.pending=null; this.reading=false; }
+  constructor(port){ this.port=port; this.decoder=new SlipDecoder(); this.pending=null; this.reading=false; this.mtu=64; }
   async open(){
     await this.port.open({ baudRate:115200 });
     this.writer=this.port.writable.getWriter();
@@ -270,8 +270,19 @@ class SerialDfu{
     if(result!==RES_SUCCESS) throw new Error(`DFU op 0x${op.toString(16)} failed, result 0x${result.toString(16)}`);
     return frame.slice(3); // payload
   }
+  /* send object data with the OBJECT_WRITE (0x08) opcode — no response when PRN=0 */
+  async writeObject(data){
+    const pkt = new Uint8Array(data.length+1);
+    pkt[0]=OP.WRITE; pkt.set(data,1);
+    await this.writer.write(slipEncode(pkt));
+  }
   /* high-level ops */
   async setPrn(n){ await this.request([OP.SET_PRN, n&0xff, (n>>8)&0xff]); }
+  async getMtu(){
+    const pl = await this.request([OP.MTU_GET]);
+    if(pl.length>=2){ this.mtu = pl[0] | (pl[1]<<8); }
+    return this.mtu;
+  }
   async select(objType){
     const pl = await this.request([OP.SELECT, objType]);
     if(pl.length<12) throw new Error("Short SELECT reply ("+pl.length+"B) — bootloader isn't speaking Nordic Secure DFU. If this is a drag-and-drop dongle, use Option 1.");
@@ -298,10 +309,11 @@ async function streamObject(dfu, objType, data, maxChunk, prnRunningCrc, onProgr
   while(offset<data.length){
     const chunk = data.subarray(offset, Math.min(offset+maxChunk, data.length));
     await dfu.createObject(objType, chunk.length);
-    // write chunk in serial-MTU sized pieces (SLIP framed)
-    const MTU=244;
-    for(let i=0;i<chunk.length;i+=MTU){
-      await dfu.writeRaw(chunk.subarray(i, Math.min(i+MTU, chunk.length)));
+    // write chunk as OBJECT_WRITE packets sized to the device MTU.
+    // worst-case SLIP doubles every byte, and 1 byte is the opcode -> (mtu-1)/2 - 1
+    const w = Math.max(1, Math.floor((dfu.mtu-1)/2) - 1);
+    for(let i=0;i<chunk.length;i+=w){
+      await dfu.writeObject(chunk.subarray(i, Math.min(i+w, chunk.length)));
     }
     runningCrc = crc32(chunk, runningCrc);
     const res = await dfu.calcCrc();
@@ -332,6 +344,8 @@ async function flash(){
 
     setStatus("Negotiating…",""); log("SET_PRN(0)");
     await dfu.setPrn(0);
+    try{ await dfu.getMtu(); log("MTU = "+dfu.mtu); }
+    catch(e){ log("MTU_GET unsupported, using "+dfu.mtu); }
 
     // ---- command object (init packet) ----
     log("Sending init packet (command object)…");
