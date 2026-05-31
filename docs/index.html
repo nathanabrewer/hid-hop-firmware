@@ -270,11 +270,19 @@ class SerialDfu{
     if(result!==RES_SUCCESS) throw new Error(`DFU op 0x${op.toString(16)} failed, result 0x${result.toString(16)}`);
     return frame.slice(3); // payload
   }
-  /* send object data with the OBJECT_WRITE (0x08) opcode — no response when PRN=0 */
-  async writeObject(data){
+  /* send one OBJECT_WRITE (0x08) packet and await its PRN CRC receipt (opcode 0x03).
+     With PRN=1 the device acks every packet, giving lockstep flow control. */
+  async writeObjectAwaitCrc(data, timeoutMs=5000){
+    if(this.pending) throw new Error("request already in flight");
     const pkt = new Uint8Array(data.length+1);
     pkt[0]=OP.WRITE; pkt.set(data,1);
+    const p = new Promise((resolve,reject)=>{ this.pending={resolve,reject,op:OP.CALC_CRC}; });
+    const timer = setTimeout(()=>{ if(this.pending){ this.pending.reject(new Error("PRN receipt timeout")); this.pending=null; } }, timeoutMs);
     await this.writer.write(slipEncode(pkt));
+    const frame = await p; clearTimeout(timer);
+    if(frame.length<11) throw new Error("short PRN receipt ["+hex(frame)+"]");
+    const dv = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
+    return { offset:dv.getUint32(3,true), crc:dv.getUint32(7,true) };
   }
   /* high-level ops */
   async setPrn(n){ await this.request([OP.SET_PRN, n&0xff, (n>>8)&0xff]); }
@@ -302,27 +310,39 @@ class SerialDfu{
   async execute(){ await this.request([OP.EXECUTE], 10000); }
 }
 
-/* ----- transfer one object (command or data), with one retry on CRC mismatch ----- */
-async function streamObject(dfu, objType, data, maxChunk, prnRunningCrc, onProgress){
-  // split into <= maxSize objects, write data, validate crc, execute
-  let offset=0, runningCrc = prnRunningCrc||0;
+/* ----- transfer an image in <=maxChunk objects, PRN-flow-controlled, with per-object retry -----
+   Requires PRN=1 (device acks a CRC after every OBJECT_WRITE packet). */
+async function streamObject(dfu, objType, data, maxChunk, startCrc, onProgress){
+  let offset=0, crc=startCrc||0;
+  // worst-case SLIP doubles every byte, and 1 byte is the opcode -> (mtu-1)/2 - 1
+  const w = Math.max(1, Math.floor((dfu.mtu-1)/2) - 1);
   while(offset<data.length){
-    const chunk = data.subarray(offset, Math.min(offset+maxChunk, data.length));
-    await dfu.createObject(objType, chunk.length);
-    // write chunk as OBJECT_WRITE packets sized to the device MTU.
-    // worst-case SLIP doubles every byte, and 1 byte is the opcode -> (mtu-1)/2 - 1
-    const w = Math.max(1, Math.floor((dfu.mtu-1)/2) - 1);
-    for(let i=0;i<chunk.length;i+=w){
-      await dfu.writeObject(chunk.subarray(i, Math.min(i+w, chunk.length)));
+    const objLen = Math.min(maxChunk, data.length-offset);
+    let ok=false;
+    for(let attempt=1; attempt<=3 && !ok; attempt++){
+      // CREATE resets this object — on retry the device discards the partial and CRC reverts to `crc`
+      await dfu.createObject(objType, objLen);
+      let objCrc=crc, good=true;
+      for(let o=0;o<objLen;o+=w){
+        const pkt = data.subarray(offset+o, offset+Math.min(o+w,objLen));
+        const r = await dfu.writeObjectAwaitCrc(pkt);
+        objCrc = crc32(pkt, objCrc);
+        if(r.crc!==objCrc){
+          log(`packet CRC mismatch @${offset+o} (dev 0x${r.crc.toString(16)} != 0x${objCrc.toString(16)}), retry ${attempt}`);
+          good=false; break;
+        }
+      }
+      if(good){
+        const res = await dfu.calcCrc();   // final confirm for the object
+        if(res.crc===objCrc){ await dfu.execute(); crc=objCrc; ok=true; }
+        else log(`object CRC mismatch @${offset} (dev 0x${res.crc.toString(16)} != 0x${objCrc.toString(16)}), retry ${attempt}`);
+      }
     }
-    runningCrc = crc32(chunk, runningCrc);
-    const res = await dfu.calcCrc();
-    if(res.crc!==runningCrc) throw new Error(`CRC mismatch at offset ${offset+chunk.length} (device 0x${res.crc.toString(16)} != local 0x${runningCrc.toString(16)})`);
-    await dfu.execute();
-    offset += chunk.length;
+    if(!ok) throw new Error(`object failed after 3 attempts at offset ${offset}`);
+    offset += objLen;
     if(onProgress) onProgress(offset, data.length);
   }
-  return runningCrc;
+  return crc;
 }
 
 async function flash(){
@@ -342,8 +362,8 @@ async function flash(){
     log("Opening port @ 115200…");
     await dfu.open();
 
-    setStatus("Negotiating…",""); log("SET_PRN(0)");
-    await dfu.setPrn(0);
+    setStatus("Negotiating…",""); log("SET_PRN(1)");
+    await dfu.setPrn(1);   // receipt after every packet -> flow control, no buffer overrun
     try{ await dfu.getMtu(); log("MTU = "+dfu.mtu); }
     catch(e){ log("MTU_GET unsupported, using "+dfu.mtu); }
 
