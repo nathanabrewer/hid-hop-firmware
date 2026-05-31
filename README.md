@@ -20,6 +20,12 @@
 
 ## 🔌 No-toolchain flashing (Web Flasher)
 
+<p align="center">
+  <a href="https://nathanabrewer.github.io/hid-hop-firmware/">
+    <img src="docs/images/flasher.png" width="420" alt="HID-HOP Web Flasher screenshot">
+  </a>
+</p>
+
 Don't want to install an SDK and compile? You don't have to. Open the
 **[HID-HOP Web Flasher](https://nathanabrewer.github.io/hid-hop-firmware/)** and pick your dongle:
 
