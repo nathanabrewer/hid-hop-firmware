@@ -210,6 +210,7 @@ const statusEl=$("#status"), logEl=$("#log"), flashBtn=$("#flashBtn");
 const progWrap=$("#progwrap"), progFill=$("#progfill"), progText=$("#progtext");
 function log(msg){ const t=new Date().toISOString().substr(11,8); logEl.textContent+=`[${t}] ${msg}\n`; logEl.scrollTop=logEl.scrollHeight; }
 function hex(bytes){ return Array.from(bytes,b=>b.toString(16).padStart(2,"0")).join(" "); }
+const sleep = ms => new Promise(r=>setTimeout(r,ms));
 function setStatus(msg,cls){ statusEl.textContent=msg; statusEl.className=cls||"muted"; }
 function setProgress(done,total,label){
   progWrap.style.display="block";
@@ -225,7 +226,9 @@ class SerialDfu{
     await this.port.open({ baudRate:115200 });
     this.writer=this.port.writable.getWriter();
     this.reader=this.port.readable.getReader();
-    this._readLoop();
+    this._readLoop();           // starts consuming; pending===null -> frames discarded
+    await sleep(400);           // flush stale responses left over from prior attempts
+    this.decoder=new SlipDecoder();   // drop any half-frame, start clean
   }
   async close(){
     try{ if(this.reader){ await this.reader.cancel(); this.reader.releaseLock(); } }catch(e){}
@@ -280,6 +283,8 @@ class SerialDfu{
     const timer = setTimeout(()=>{ if(this.pending){ this.pending.reject(new Error("PRN receipt timeout")); this.pending=null; } }, timeoutMs);
     await this.writer.write(slipEncode(pkt));
     const frame = await p; clearTimeout(timer);
+    if(frame.length>=3 && frame[2]!==RES_SUCCESS)
+      throw new Error("PRN receipt error: result 0x"+frame[2].toString(16)+" ["+hex(frame)+"]");
     if(frame.length<11) throw new Error("short PRN receipt ["+hex(frame)+"]");
     const dv = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
     return { offset:dv.getUint32(3,true), crc:dv.getUint32(7,true) };
