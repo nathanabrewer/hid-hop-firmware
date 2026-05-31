@@ -6,14 +6,19 @@
 <title>HID-HOP Web Flasher</title>
 <style>
   :root{
+    /* palette sampled directly from the HID-HOP logo (docs/images/hopguy.png) */
     --bg:#070607; --panel:#140a18; --border:#3a1d4a; --text:#f0e6f5;
-    --muted:#a98bb8; --accent:#8a04d0; --accent2:#c026d3; --good:#3fb950; --bad:#f85149; --warn:#d29922;
+    --muted:#a98bb8;
+    --accent:#940dc1;   /* mascot purple */
+    --accent2:#c515d7;  /* magenta-purple */
+    --hot:#ff5af6;      /* hot pink-magenta of the HID-HOP lettering */
+    --good:#3fb950; --bad:#f85149; --warn:#d29922;
   }
   *{box-sizing:border-box}
   body{
     margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
     background:
-      radial-gradient(900px 500px at 50% -8%, rgba(138,4,208,.28), transparent 60%),
+      radial-gradient(900px 500px at 50% -8%, rgba(148,13,193,.30), transparent 60%),
       var(--bg);
     background-attachment:fixed;
     color:var(--text); line-height:1.5;
@@ -34,6 +39,11 @@
   button:hover:not(:disabled){filter:brightness(1.1)}
   button:disabled{opacity:.45; cursor:not-allowed}
   button.ghost{background:transparent; border:1px solid var(--border); color:var(--text)}
+  .tab{flex:1 1 auto; min-width:180px}
+  .tab.ghost{filter:none}
+  a[download]{display:inline-block;margin-top:4px;font-weight:600;color:#fff;text-decoration:none;
+    padding:9px 16px;border-radius:8px;background:linear-gradient(135deg,var(--accent),var(--accent2))}
+  a[download]:hover{filter:brightness(1.1)}
   .row{display:flex; gap:10px; flex-wrap:wrap; align-items:center}
   .step{display:flex; gap:12px; margin:0 0 14px}
   .step .n{
@@ -71,23 +81,37 @@
 <div class="wrap">
   <header style="text-align:center">
     <img src="images/hopguy.png" alt="HID-HOP" width="120" height="120"
-         style="image-rendering:auto;filter:drop-shadow(0 0 24px rgba(138,4,208,.55));margin-bottom:6px">
-    <h1 style="background:linear-gradient(90deg,#c026d3,#8a04d0);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent">HID-HOP Web Flasher</h1>
-    <p style="max-width:520px;margin:0 auto 24px">Flash the HID-HOP firmware to your Raytac MDBT50Q&#8209;CX&#8209;40 dongle — right from your browser. No toolchain, no compiling.</p>
+         style="image-rendering:auto;filter:drop-shadow(0 0 26px rgba(255,90,246,.45));margin-bottom:6px">
+    <h1 style="background:linear-gradient(90deg,#ff5af6,#940dc1);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent">HID-HOP Web Flasher</h1>
+    <p style="max-width:540px;margin:0 auto 24px">Get the HID-HOP firmware onto your nRF52840 dongle — no toolchain, no compiling. Pick your dongle below.</p>
   </header>
 
-  <div id="compat" class="notice">Checking browser compatibility…</div>
-
   <div class="card">
-    <h2>How it works</h2>
-    <div class="step"><div class="n">1</div><div class="body"><b>Enter DFU mode</b><span>Unplug the dongle. <b>Hold the button</b> and plug it back in while holding. Release after ~1 second. The LED pattern changes to show it's in the bootloader.</span></div></div>
-    <div class="step"><div class="n">2</div><div class="body"><b>Connect</b><span>Click <i>Connect &amp; Flash</i> and pick the dongle's serial port in the browser prompt (often labelled <code>Open DFU Bootloader</code> or an <code>nRF</code> / <code>SEGGER</code> port).</span></div></div>
-    <div class="step"><div class="n">3</div><div class="body"><b>Done</b><span>The firmware streams over, the dongle reboots, and shows up as a USB HID device. That's it.</span></div></div>
+    <h2>Which dongle do you have?</h2>
+    <p class="muted" style="margin-top:0">Two kinds of nRF52840 dongles, two ways to flash. Not sure? If plugging it in while double-tapping a reset shows up as a <b>USB drive</b>, it's drag-and-drop (Option 1).</p>
+    <div class="row" role="tablist">
+      <button id="tabUf2" class="tab" type="button">📁 Drag-and-drop (.uf2)</button>
+      <button id="tabSerial" class="tab ghost" type="button">⚡ Browser flash (Raytac)</button>
+    </div>
   </div>
 
-  <div class="card">
-    <h2>Flash</h2>
-    <div class="row">
+  <!-- ===== Option 1: UF2 drag-and-drop ===== -->
+  <section id="panelUf2" class="card">
+    <h2>Option 1 · Drag-and-drop a <code>.uf2</code></h2>
+    <p class="muted" style="margin-top:0">For <b>Seeed XIAO nRF52840</b>, <b>Makerdiary MDK</b>, and other Adafruit-bootloader dongles. Can't really go wrong — it's just copying a file.</p>
+    <div class="step"><div class="n">1</div><div class="body"><b>Download the firmware</b><span><a id="uf2dl" href="firmware/hid-hop-xiao.uf2" download>⬇ hid-hop-xiao.uf2</a></span></div></div>
+    <div class="step"><div class="n">2</div><div class="body"><b>Enter bootloader</b><span>Plug the dongle in and <b>double-tap the RESET button</b>. A USB drive appears (e.g. <code>XIAO-SENSE</code> / <code>NRF52BOOT</code>).</span></div></div>
+    <div class="step"><div class="n">3</div><div class="body"><b>Drag it on</b><span>Copy <code>hid-hop-xiao.uf2</code> onto that drive. The dongle flashes, reboots automatically, and comes up as a USB HID device. Done.</span></div></div>
+  </section>
+
+  <!-- ===== Option 2: WebSerial Nordic DFU ===== -->
+  <section id="panelSerial" class="card" style="display:none">
+    <h2>Option 2 · Flash in the browser</h2>
+    <p class="muted" style="margin-top:0">For the <b>Raytac MDBT50Q-CX-40</b> dongle (Nordic Open DFU bootloader) — flashed over Web Serial.</p>
+    <div id="compat" class="notice">Checking browser compatibility…</div>
+    <div class="step"><div class="n">1</div><div class="body"><b>Enter DFU mode</b><span>Unplug the dongle. <b>Hold the button</b> and plug it back in while holding. Release after ~1 second.</span></div></div>
+    <div class="step"><div class="n">2</div><div class="body"><b>Connect &amp; flash</b><span>Click below and pick the dongle's serial port (often <code>Open DFU Bootloader</code> or an <code>nRF</code> port).</span></div></div>
+    <div class="row" style="margin-top:6px">
       <button id="flashBtn" disabled>Connect &amp; Flash</button>
       <button id="logBtn" class="ghost" type="button">Show log</button>
       <span id="status" class="muted">Idle.</span>
@@ -97,7 +121,7 @@
       <div id="progtext"></div>
     </div>
     <div id="log"></div>
-  </div>
+  </section>
 
   <div class="card thanks">
     <h2>Shoutouts &amp; thanks <span class="heart">♥</span></h2>
@@ -117,7 +141,7 @@
   <footer>
     HID-HOP · nRF52840 BLE&#8202;→&#8202;USB HID bridge ·
     <a href="https://github.com/nathanabrewer/hid-hop-firmware" target="_blank" rel="noopener">source on GitHub</a><br>
-    Built with the Nordic Secure DFU protocol over the Web Serial API.<br>
+    Drag-and-drop UF2, or Nordic Secure DFU over the Web Serial API.<br>
     <span id="fwinfo" class="muted">firmware build: loading…</span>
   </footer>
 </div>
@@ -185,6 +209,7 @@ const $ = s => document.querySelector(s);
 const statusEl=$("#status"), logEl=$("#log"), flashBtn=$("#flashBtn");
 const progWrap=$("#progwrap"), progFill=$("#progfill"), progText=$("#progtext");
 function log(msg){ const t=new Date().toISOString().substr(11,8); logEl.textContent+=`[${t}] ${msg}\n`; logEl.scrollTop=logEl.scrollHeight; }
+function hex(bytes){ return Array.from(bytes,b=>b.toString(16).padStart(2,"0")).join(" "); }
 function setStatus(msg,cls){ statusEl.textContent=msg; statusEl.className=cls||"muted"; }
 function setProgress(done,total,label){
   progWrap.style.display="block";
@@ -227,9 +252,12 @@ class SerialDfu{
     if(this.pending) throw new Error("request already in flight");
     const p = new Promise((resolve,reject)=>{ this.pending={resolve,reject}; });
     const timer = setTimeout(()=>{ if(this.pending){ this.pending.reject(new Error("DFU response timeout")); this.pending=null; } }, timeoutMs);
+    log("TX " + hex(bytes));
     await this.writer.write(slipEncode(bytes));
     const frame = await p; clearTimeout(timer);
-    if(frame[0]!==OP.RESPONSE) throw new Error("bad response marker 0x"+frame[0].toString(16));
+    log("RX " + hex(frame));
+    if(frame.length<3 || frame[0]!==OP.RESPONSE)
+      throw new Error("Unexpected reply ["+hex(frame)+"] — is this dongle in Nordic DFU mode? (UF2 dongles use Option 1 instead.)");
     const op=frame[1], result=frame[2];
     if(result!==RES_SUCCESS) throw new Error(`DFU op 0x${op.toString(16)} failed, result 0x${result.toString(16)}`);
     return frame.slice(3); // payload
@@ -238,6 +266,7 @@ class SerialDfu{
   async setPrn(n){ await this.request([OP.SET_PRN, n&0xff, (n>>8)&0xff]); }
   async select(objType){
     const pl = await this.request([OP.SELECT, objType]);
+    if(pl.length<12) throw new Error("Short SELECT reply ("+pl.length+"B) — bootloader isn't speaking Nordic Secure DFU. If this is a drag-and-drop dongle, use Option 1.");
     const dv = new DataView(pl.buffer, pl.byteOffset, pl.byteLength);
     return { maxSize:dv.getUint32(0,true), offset:dv.getUint32(4,true), crc:dv.getUint32(8,true) };
   }
@@ -247,6 +276,7 @@ class SerialDfu{
   }
   async calcCrc(){
     const pl=await this.request([OP.CALC_CRC]);
+    if(pl.length<8) throw new Error("Short CRC reply ("+pl.length+"B)");
     const dv=new DataView(pl.buffer,pl.byteOffset,pl.byteLength);
     return { offset:dv.getUint32(0,true), crc:dv.getUint32(4,true) };
   }
@@ -338,6 +368,17 @@ async function flash(){
   flashBtn.disabled=false;
   flashBtn.addEventListener("click",flash);
 })();
+/* ----- dongle picker tabs ----- */
+function showPanel(which){
+  const uf2 = which==="uf2";
+  $("#panelUf2").style.display = uf2 ? "" : "none";
+  $("#panelSerial").style.display = uf2 ? "none" : "";
+  $("#tabUf2").className = "tab" + (uf2 ? "" : " ghost");
+  $("#tabSerial").className = "tab" + (uf2 ? " ghost" : "");
+}
+$("#tabUf2").addEventListener("click",()=>showPanel("uf2"));
+$("#tabSerial").addEventListener("click",()=>showPanel("serial"));
+
 /* show firmware provenance */
 fetch("firmware/build-info.json").then(r=>r.json()).then(b=>{
   $("#fwinfo").textContent=`firmware: ${b.board} · commit ${b.git_sha} · ${(b.bin_bytes/1024|0)} KB`;

@@ -20,13 +20,15 @@
 
 ## 🔌 No-toolchain flashing (Web Flasher)
 
-Don't want to install an SDK and compile? You don't have to.
+Don't want to install an SDK and compile? You don't have to. Open the
+**[HID-HOP Web Flasher](https://nathanabrewer.github.io/hid-hop-firmware/)** and pick your dongle:
 
-1. Open the **[HID-HOP Web Flasher](https://nathanabrewer.github.io/hid-hop-firmware/)** in **Chrome** or **Edge** (desktop).
-2. Put the Raytac dongle in **DFU mode**: unplug it, hold the button, plug it back in while holding, release after ~1 second.
-3. Click **Connect & Flash**, pick the dongle's serial port, and you're done.
+- **Drag-and-drop dongles** (Seeed XIAO nRF52840, Makerdiary MDK, Adafruit-bootloader boards):
+  download the `.uf2`, double-tap RESET so the dongle mounts as a USB drive, and drag the file on. Done.
+- **Raytac MDBT50Q-CX-40** (Nordic Open DFU): in **Chrome/Edge**, put it in DFU mode (hold button while plugging in),
+  click **Connect & Flash**, and pick the serial port. It streams over the Nordic Secure DFU protocol (Web Serial API).
 
-It flashes a prebuilt firmware image straight from the browser over the Nordic Secure DFU protocol (Web Serial API) — no `nrfutil`, no Docker, no west. Prefer to build it yourself? See [Building](#build-system) below, or run `scripts/build-release.sh`.
+Either way: no `nrfutil`, no Docker, no west. Prefer to build it yourself? See [Building](#build-system) below, or run `scripts/build-release.sh`.
 
 ---
 
